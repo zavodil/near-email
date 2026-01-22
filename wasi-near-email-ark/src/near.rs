@@ -20,7 +20,8 @@ pub fn verify_signature(
     let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes)?;
 
     // Parse signature (base64 encoded)
-    let sig_bytes = base64::decode(signature_b64)?;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let sig_bytes = STANDARD.decode(signature_b64)?;
     if sig_bytes.len() != 64 {
         return Err("Invalid signature length".into());
     }

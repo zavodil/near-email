@@ -3,7 +3,11 @@
 //! Communicates with the database via HTTP API (since WASI can't do direct DB connections)
 
 use crate::types::*;
-use wasi_http_client::{Client, Method, Request};
+use std::time::Duration;
+use wasi_http_client::Client;
+
+/// HTTP request timeout
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fetch encrypted emails for an account
 pub fn fetch_emails(
@@ -17,16 +21,17 @@ pub fn fetch_emails(
         api_url, account_id, limit, offset
     );
 
-    let client = Client::new();
-    let request = Request::new(Method::Get, &url);
-    let response = client.send(request)?;
+    let response = Client::new()
+        .get(&url)
+        .connect_timeout(TIMEOUT)
+        .send()?;
 
     if response.status() != 200 {
         return Err(format!("Database API error: {}", response.status()).into());
     }
 
-    let body = response.body();
-    let result: DbEmailsResponse = serde_json::from_slice(body)?;
+    let body = response.body()?;
+    let result: DbEmailsResponse = serde_json::from_slice(&body)?;
 
     Ok(result.emails)
 }
@@ -37,7 +42,7 @@ pub fn send_email(
     from_account: &str,
     to: &str,
     subject: &str,
-    body: &str,
+    body_text: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let url = format!("{}/send", api_url);
 
@@ -45,15 +50,16 @@ pub fn send_email(
         "from_account": from_account,
         "to": to,
         "subject": subject,
-        "body": body,
+        "body": body_text,
     });
 
-    let client = Client::new();
-    let request = Request::new(Method::Post, &url)
+    let body_data = serde_json::to_vec(&payload)?;
+    let response = Client::new()
+        .post(&url)
         .header("Content-Type", "application/json")
-        .body(serde_json::to_vec(&payload)?);
-
-    let response = client.send(request)?;
+        .body(&body_data)
+        .connect_timeout(TIMEOUT)
+        .send()?;
 
     if response.status() != 200 {
         return Err(format!("Send email failed: {}", response.status()).into());
@@ -74,19 +80,20 @@ pub fn delete_email(
         "account_id": account_id,
     });
 
-    let client = Client::new();
-    let request = Request::new(Method::Delete, &url)
+    let body_data = serde_json::to_vec(&payload)?;
+    let response = Client::new()
+        .delete(&url)
         .header("Content-Type", "application/json")
-        .body(serde_json::to_vec(&payload)?);
-
-    let response = client.send(request)?;
+        .body(&body_data)
+        .connect_timeout(TIMEOUT)
+        .send()?;
 
     if response.status() != 200 {
         return Err(format!("Delete email failed: {}", response.status()).into());
     }
 
-    let body = response.body();
-    let result: DbGenericResponse = serde_json::from_slice(body)?;
+    let body = response.body()?;
+    let result: DbGenericResponse = serde_json::from_slice(&body)?;
 
     Ok(result.deleted)
 }
@@ -98,16 +105,17 @@ pub fn count_emails(
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let url = format!("{}/emails/count?recipient={}", api_url, account_id);
 
-    let client = Client::new();
-    let request = Request::new(Method::Get, &url);
-    let response = client.send(request)?;
+    let response = Client::new()
+        .get(&url)
+        .connect_timeout(TIMEOUT)
+        .send()?;
 
     if response.status() != 200 {
         return Err(format!("Count emails failed: {}", response.status()).into());
     }
 
-    let body = response.body();
-    let result: DbCountResponse = serde_json::from_slice(body)?;
+    let body = response.body()?;
+    let result: DbCountResponse = serde_json::from_slice(&body)?;
 
     Ok(result.count)
 }
@@ -130,20 +138,21 @@ pub fn store_internal_email(
         "encrypted_data": STANDARD.encode(encrypted_data),
     });
 
-    let client = Client::new();
-    let request = Request::new(Method::Post, &url)
+    let body_data = serde_json::to_vec(&payload)?;
+    let response = Client::new()
+        .post(&url)
         .header("Content-Type", "application/json")
-        .body(serde_json::to_vec(&payload)?);
-
-    let response = client.send(request)?;
+        .body(&body_data)
+        .connect_timeout(TIMEOUT)
+        .send()?;
 
     if response.status() != 200 {
         return Err(format!("Store internal email failed: {}", response.status()).into());
     }
 
     // Parse response to get the email ID
-    let body = response.body();
-    let result: serde_json::Value = serde_json::from_slice(body)?;
+    let body = response.body()?;
+    let result: serde_json::Value = serde_json::from_slice(&body)?;
     let id = result["id"].as_str().unwrap_or("unknown").to_string();
 
     Ok(id)
