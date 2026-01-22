@@ -7,6 +7,7 @@ use secp256k1::PublicKey;
 use sqlx::PgPool;
 use std::io;
 use std::net::IpAddr;
+use tokio::runtime::Handle;
 use tracing::{error, info, warn};
 
 /// SMTP handler that encrypts and stores emails
@@ -17,6 +18,8 @@ pub struct NearEmailHandler {
     email_domain: String,
     /// Default account suffix for simple addresses (e.g., ".near" or ".testnet")
     default_account_suffix: String,
+    /// Tokio runtime handle for async operations (mailin runs in a separate thread pool)
+    rt_handle: Handle,
     // Transaction state
     current_from: Option<String>,
     current_to: Vec<String>,
@@ -29,12 +32,14 @@ impl NearEmailHandler {
         master_pubkey: PublicKey,
         email_domain: String,
         default_account_suffix: String,
+        rt_handle: Handle,
     ) -> Self {
         Self {
             db_pool,
             master_pubkey,
             email_domain,
             default_account_suffix,
+            rt_handle,
             current_from: None,
             current_to: Vec::new(),
             current_data: Vec::new(),
@@ -96,30 +101,28 @@ impl NearEmailHandler {
             let from_clone = from.to_string();
             let subject_clone = subject_hint.clone();
 
-            // Use blocking task for async database operation
-            tokio::task::block_in_place(|| {
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(async {
-                    match db::store_email(
-                        &db_pool,
-                        &account_id_clone,
-                        &from_clone,
-                        subject_clone.as_deref(),
-                        &encrypted,
-                    )
-                    .await
-                    {
-                        Ok(id) => {
-                            info!(
-                                "Stored email {} for {} from {} (subject: {:?})",
-                                id, account_id_clone, from_clone, subject_clone
-                            );
-                        }
-                        Err(e) => {
-                            error!("Failed to store email for {}: {}", account_id_clone, e);
-                        }
+            // Run async database operation on the saved Tokio runtime handle
+            // (mailin_embedded runs handlers in a separate thread pool without Tokio context)
+            self.rt_handle.block_on(async {
+                match db::store_email(
+                    &db_pool,
+                    &account_id_clone,
+                    &from_clone,
+                    subject_clone.as_deref(),
+                    &encrypted,
+                )
+                .await
+                {
+                    Ok(id) => {
+                        info!(
+                            "Stored email {} for {} from {} (subject: {:?})",
+                            id, account_id_clone, from_clone, subject_clone
+                        );
                     }
-                });
+                    Err(e) => {
+                        error!("Failed to store email for {}: {}", account_id_clone, e);
+                    }
+                }
             });
         }
     }

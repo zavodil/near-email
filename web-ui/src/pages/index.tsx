@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { AccountState } from '@near-wallet-selector/core';
-import { showModal, signOut, getEmails, getEmailCount, type Email } from '@/lib/near';
+import { showModal, signOut, getEmails, type Email } from '@/lib/near';
 import EmailList from '@/components/EmailList';
 import EmailView from '@/components/EmailView';
 import ComposeModal from '@/components/ComposeModal';
@@ -13,32 +13,27 @@ interface HomeProps {
 export default function Home({ accounts, loading }: HomeProps) {
   const [emails, setEmails] = useState<Email[]>([]);
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
-  const [emailCount, setEmailCount] = useState(0);
+  const [emailCount, setEmailCount] = useState<number | null>(null);
   const [loadingEmails, setLoadingEmails] = useState(false);
   const [showCompose, setShowCompose] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasCheckedMail, setHasCheckedMail] = useState(false);
 
   const isConnected = accounts.length > 0;
   const accountId = isConnected ? accounts[0].accountId : null;
-  const emailAddress = accountId ? `${accountId.replace('.near', '')}@near.email` : null;
-
-  // Load emails when connected
-  useEffect(() => {
-    if (isConnected) {
-      loadEmails();
-    }
-  }, [isConnected]);
+  // Handle both .near and .testnet suffixes
+  const emailAddress = accountId
+    ? `${accountId.replace('.near', '').replace('.testnet', '')}@near.email`
+    : null;
 
   async function loadEmails() {
     setLoadingEmails(true);
     setError(null);
     try {
-      const [emailList, count] = await Promise.all([
-        getEmails(),
-        getEmailCount(),
-      ]);
+      const emailList = await getEmails();
       setEmails(emailList);
-      setEmailCount(count);
+      setEmailCount(emailList.length);
+      setHasCheckedMail(true);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -54,12 +49,50 @@ export default function Home({ accounts, loading }: HomeProps) {
     await signOut();
     setEmails([]);
     setSelectedEmail(null);
+    setEmailCount(null);
+    setHasCheckedMail(false);
   }
 
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-xl text-gray-600">Loading...</div>
+      </div>
+    );
+  }
+
+  // Check mail screen - connected but hasn't checked yet
+  if (isConnected && !hasCheckedMail) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center p-8">
+        <h1 className="text-5xl font-bold text-gray-900 mb-4">near.email</h1>
+
+        <div className="bg-white rounded-lg shadow-lg p-8 max-w-md w-full text-center">
+          <p className="text-gray-600 mb-2">Connected as</p>
+          <p className="text-xl font-semibold text-gray-900 mb-2">{accountId}</p>
+          <p className="text-gray-500 mb-6">{emailAddress}</p>
+
+          {error && (
+            <div className="bg-red-100 text-red-700 p-3 rounded-lg mb-4">
+              {error}
+            </div>
+          )}
+
+          <button
+            onClick={loadEmails}
+            disabled={loadingEmails}
+            className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50 mb-4"
+          >
+            {loadingEmails ? 'Loading...' : 'Check Mail'}
+          </button>
+
+          <button
+            onClick={handleDisconnect}
+            className="text-red-600 hover:text-red-700 transition-colors"
+          >
+            Disconnect
+          </button>
+        </div>
       </div>
     );
   }
@@ -153,7 +186,7 @@ export default function Home({ accounts, loading }: HomeProps) {
         {/* Email list */}
         <div className="w-1/3 border-r bg-white overflow-y-auto">
           <div className="p-4 border-b bg-gray-50">
-            <span className="text-gray-600">{emailCount} emails</span>
+            <span className="text-gray-600">{emailCount ?? 0} emails</span>
           </div>
           <EmailList
             emails={emails}

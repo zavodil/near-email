@@ -67,8 +67,10 @@ services:
       dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_NETWORK_ID: testnet
-        NEXT_PUBLIC_OUTLAYER_API_URL: ${OUTLAYER_API_URL:-https://testnet-api.outlayer.fastnear.com}
-        NEXT_PUBLIC_PROJECT_ID: near-email-testnet
+        NEXT_PUBLIC_OUTLAYER_CONTRACT: outlayer.testnet
+        NEXT_PUBLIC_PROJECT_ID: ${PROJECT_ID:-zavodil2.testnet/near-email}
+        NEXT_PUBLIC_SECRETS_PROFILE: ${SECRETS_PROFILE:-default}
+        NEXT_PUBLIC_SECRETS_ACCOUNT_ID: ${SECRETS_ACCOUNT_ID:-zavodil2.testnet}
     ports:
       - "3000:3000"
 

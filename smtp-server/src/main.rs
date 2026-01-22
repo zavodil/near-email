@@ -60,12 +60,14 @@ async fn main() -> Result<()> {
     // Run migrations
     db::run_migrations(&db_pool).await?;
 
-    // Create handler
+    // Create handler with Tokio runtime handle
+    // (mailin_embedded runs in a separate thread pool, needs handle for async DB ops)
     let handler = handler::NearEmailHandler::new(
         db_pool,
         master_pubkey,
         email_domain,
         default_account_suffix,
+        tokio::runtime::Handle::current(),
     );
 
     // Start SMTP server

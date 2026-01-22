@@ -8,45 +8,28 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "action")]
 #[serde(rename_all = "snake_case")]
 pub enum Request {
-    /// Get emails for an account
+    /// Get emails for the signer (authenticated via NEAR transaction)
     GetEmails {
-        account_id: String,
-        signature: String,
-        public_key: String,
-        message: String,
         #[serde(default)]
         limit: Option<i64>,
         #[serde(default)]
         offset: Option<i64>,
     },
 
-    /// Send email from an account
+    /// Send email from the signer's account
     SendEmail {
-        account_id: String,
-        signature: String,
-        public_key: String,
-        message: String,
         to: String,
         subject: String,
         body: String,
     },
 
-    /// Delete an email
+    /// Delete an email (must belong to signer)
     DeleteEmail {
-        account_id: String,
-        signature: String,
-        public_key: String,
-        message: String,
         email_id: String,
     },
 
-    /// Get email count
-    GetEmailCount {
-        account_id: String,
-        signature: String,
-        public_key: String,
-        message: String,
-    },
+    /// Get email count for the signer
+    GetEmailCount,
 
     /// Get master public key (for SMTP server encryption)
     /// No authentication required - public key is safe to share

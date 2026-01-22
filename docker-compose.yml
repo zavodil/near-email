@@ -58,10 +58,12 @@ services:
     build:
       context: ./web-ui
       dockerfile: Dockerfile
-    environment:
-      NEXT_PUBLIC_NETWORK_ID: mainnet
-      NEXT_PUBLIC_OUTLAYER_API_URL: ${OUTLAYER_API_URL:-https://outlayer.xyz}
-      NEXT_PUBLIC_PROJECT_ID: near-email
+      args:
+        NEXT_PUBLIC_NETWORK_ID: mainnet
+        NEXT_PUBLIC_OUTLAYER_CONTRACT: outlayer.near
+        NEXT_PUBLIC_PROJECT_ID: ${PROJECT_ID:-near-email}
+        NEXT_PUBLIC_SECRETS_PROFILE: ${SECRETS_PROFILE:-default}
+        NEXT_PUBLIC_SECRETS_ACCOUNT_ID: ${SECRETS_ACCOUNT_ID}
     ports:
       - "3000:3000"
 

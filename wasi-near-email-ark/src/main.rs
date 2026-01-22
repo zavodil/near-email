@@ -1,14 +1,17 @@
 //! OutLayer WASI module for near.email
 //!
 //! Decrypts emails for NEAR account owners by:
-//! 1. Verifying NEAR signature (prove account ownership)
-//! 2. Deriving private key from master key + account_id
-//! 3. Fetching encrypted emails from database
-//! 4. Decrypting and returning plaintext emails
+//! 1. Deriving private key from master key + account_id
+//! 2. Fetching encrypted emails from database
+//! 3. Decrypting and returning plaintext emails
+//!
+//! Note: No signature verification needed - emails are encrypted per-account,
+//! only TEE with master key can decrypt.
 
 mod crypto;
 mod db;
-mod near;
+#[allow(dead_code)]
+mod near; // Keep for potential future use
 mod types;
 
 use outlayer::{env, storage};
@@ -36,9 +39,14 @@ fn main() {
 }
 
 fn process() -> Result<Response, Box<dyn std::error::Error>> {
-    // Read input
-    let input: Request = env::input_json()?
-        .ok_or("No input provided")?;
+    // Read raw input for debugging
+    let raw_input = env::input();
+    let raw_str = String::from_utf8_lossy(&raw_input);
+    eprintln!("DEBUG raw input: {}", raw_str);
+
+    // Parse input
+    let input: Request = serde_json::from_slice(&raw_input)
+        .map_err(|e| format!("Failed to parse input: {}. Raw: {}", e, raw_str))?;
 
     // Get master private key from secrets (PRIVATE_ prefix for OutLayer private secrets)
     let master_privkey_hex = std::env::var("PROTECTED_MASTER_KEY")
@@ -56,17 +64,20 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
     let default_account_suffix = std::env::var("DEFAULT_ACCOUNT_SUFFIX")
         .unwrap_or_else(|_| ".near".to_string());
 
+    // Get authenticated signer from OutLayer (set by blockchain transaction)
+    // This is the account that signed the transaction to outlayer contract
+    let get_signer = || -> Result<String, Box<dyn std::error::Error>> {
+        env::signer_account_id()
+            .ok_or_else(|| "No signer account - must be called via NEAR transaction".into())
+    };
+
     match input {
         Request::GetEmails {
-            account_id,
-            signature,
-            public_key,
-            message,
             limit,
             offset,
         } => {
-            // Verify NEAR signature
-            near::verify_signature(&account_id, &message, &signature, &public_key)?;
+            // Get authenticated signer
+            let account_id = get_signer()?;
 
             // Derive user's private key
             let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
@@ -108,16 +119,12 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
         }
 
         Request::SendEmail {
-            account_id,
-            signature,
-            public_key,
-            message,
             to,
             subject,
             body,
         } => {
-            // Verify NEAR signature
-            near::verify_signature(&account_id, &message, &signature, &public_key)?;
+            // Get authenticated signer
+            let account_id = get_signer()?;
 
             // Check if internal email (@near.email)
             let internal_suffix = "@near.email";
@@ -163,14 +170,10 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
         }
 
         Request::DeleteEmail {
-            account_id,
-            signature,
-            public_key,
-            message,
             email_id,
         } => {
-            // Verify NEAR signature
-            near::verify_signature(&account_id, &message, &signature, &public_key)?;
+            // Get authenticated signer
+            let account_id = get_signer()?;
 
             // Delete email from database
             let deleted = db::delete_email(&get_db_api_url()?, &email_id, &account_id)?;
@@ -181,14 +184,9 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             }))
         }
 
-        Request::GetEmailCount {
-            account_id,
-            signature,
-            public_key,
-            message,
-        } => {
-            // Verify NEAR signature
-            near::verify_signature(&account_id, &message, &signature, &public_key)?;
+        Request::GetEmailCount => {
+            // Get authenticated signer
+            let account_id = get_signer()?;
 
             // Get email count
             let count = db::count_emails(&get_db_api_url()?, &account_id)?;
