@@ -2,7 +2,7 @@ FROM rust:1.85-bookworm as builder
 
 WORKDIR /app
 COPY . .
-RUN cargo build --release
+RUN cargo update home --precise 0.5.9 && cargo build --release
 
 FROM debian:bookworm-slim
 
