@@ -2,11 +2,11 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 /// Email record in database
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, FromRow)]
 pub struct EmailRecord {
     pub id: Uuid,
     pub recipient: String,
@@ -87,8 +87,7 @@ pub async fn get_emails_for_recipient(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<EmailRecord>> {
-    let records = sqlx::query_as!(
-        EmailRecord,
+    let records: Vec<EmailRecord> = sqlx::query_as(
         r#"
         SELECT id, recipient, sender_email, subject_hint, encrypted_data, received_at
         FROM emails
@@ -96,10 +95,10 @@ pub async fn get_emails_for_recipient(
         ORDER BY received_at DESC
         LIMIT $2 OFFSET $3
         "#,
-        recipient,
-        limit,
-        offset
     )
+    .bind(recipient)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await?;
 
