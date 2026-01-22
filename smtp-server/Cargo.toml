@@ -13,7 +13,7 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full"] }
 
 # SMTP server
-mailin-embedded = "=0.7.1"
+mailin-embedded = { version = "=0.7.1", features = ["rtls"] }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono"] }

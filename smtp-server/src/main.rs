@@ -69,12 +69,12 @@ async fn main() -> Result<()> {
     let addr = format!("{}:{}", smtp_host, smtp_port);
     info!("Starting SMTP server on {}", addr);
 
-    let server = Server::new(handler)
-        .with_name("near.email")
-        .with_ssl(SslConfig::None)?
-        .with_addr(&addr)?;
+    let mut server = Server::new(handler);
+    server.with_name("near.email");
+    server.with_ssl(SslConfig::None).map_err(|e| anyhow::anyhow!("SSL config error: {}", e))?;
+    server.with_addr(&addr).map_err(|e| anyhow::anyhow!("Address config error: {}", e))?;
 
-    server.serve().await?;
+    server.serve().map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
 
     Ok(())
 }

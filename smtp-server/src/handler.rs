@@ -1,14 +1,16 @@
 //! SMTP handler for near.email
 
 use crate::{crypto, db};
-use mailin_embedded::{Handler, Response};
+use mailin_embedded::{response, Handler, Response};
 use mail_parser::MessageParser;
 use secp256k1::PublicKey;
 use sqlx::PgPool;
+use std::io;
 use std::net::IpAddr;
 use tracing::{error, info, warn};
 
 /// SMTP handler that encrypts and stores emails
+#[derive(Clone)]
 pub struct NearEmailHandler {
     db_pool: PgPool,
     master_pubkey: PublicKey,
@@ -16,6 +18,7 @@ pub struct NearEmailHandler {
     // Transaction state
     current_from: Option<String>,
     current_to: Vec<String>,
+    current_data: Vec<u8>,
 }
 
 impl NearEmailHandler {
@@ -26,6 +29,7 @@ impl NearEmailHandler {
             email_domain,
             current_from: None,
             current_to: Vec::new(),
+            current_data: Vec::new(),
         }
     }
 
@@ -117,13 +121,15 @@ impl Handler for NearEmailHandler {
         // Reset state for new connection
         self.current_from = None;
         self.current_to.clear();
-        Response::Ok
+        self.current_data.clear();
+        response::OK
     }
 
     fn mail(&mut self, _ip: IpAddr, _domain: &str, from: &str) -> Response {
         self.current_from = Some(from.to_string());
         self.current_to.clear();
-        Response::Ok
+        self.current_data.clear();
+        response::OK
     }
 
     fn rcpt(&mut self, to: &str) -> Response {
@@ -131,21 +137,40 @@ impl Handler for NearEmailHandler {
         let suffix = format!("@{}", self.email_domain);
         if to.to_lowercase().ends_with(&suffix) {
             self.current_to.push(to.to_string());
-            Response::Ok
+            response::OK
         } else {
             warn!("Rejected recipient (not @{}): {}", self.email_domain, to);
-            Response::NoMailbox
+            response::NO_MAILBOX
         }
     }
 
-    fn data(&mut self, _domain: &str, from: &str, _is8bit: bool, data: &[u8]) -> Response {
+    fn data_start(
+        &mut self,
+        _domain: &str,
+        _from: &str,
+        _is8bit: bool,
+        _to: &[String],
+    ) -> Response {
+        self.current_data.clear();
+        response::OK
+    }
+
+    fn data(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.current_data.extend_from_slice(buf);
+        Ok(())
+    }
+
+    fn data_end(&mut self) -> Response {
         if self.current_to.is_empty() {
-            return Response::NoMailbox;
+            return response::NO_MAILBOX;
         }
 
+        let from = self.current_from.clone().unwrap_or_default();
         let recipients = std::mem::take(&mut self.current_to);
-        self.process_email(from, &recipients, data);
+        let data = std::mem::take(&mut self.current_data);
 
-        Response::Ok
+        self.process_email(&from, &recipients, &data);
+
+        response::OK
     }
 }
