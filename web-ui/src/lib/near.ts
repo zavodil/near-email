@@ -5,6 +5,7 @@ import { setupHereWallet } from '@near-wallet-selector/here-wallet';
 import { setupMeteorWallet } from '@near-wallet-selector/meteor-wallet';
 import type { WalletSelector, AccountState } from '@near-wallet-selector/core';
 import { actionCreators } from '@near-js/transactions';
+import { PrivateKey, decrypt } from 'eciesjs';
 
 // Configuration
 const NETWORK_ID = process.env.NEXT_PUBLIC_NETWORK_ID || 'mainnet';
@@ -167,8 +168,30 @@ export async function callOutLayer(action: string, params: Record<string, any>):
 
 // API functions
 export async function getEmails(limit = 50, offset = 0): Promise<Email[]> {
-  const result = await callOutLayer('get_emails', { limit, offset });
-  return result.emails || [];
+  // Generate ephemeral keypair for this request
+  // The private key never leaves the browser
+  const ephemeralKey = new PrivateKey();
+  const ephemeralPubkeyHex = ephemeralKey.publicKey.toHex();
+
+  console.log('🔐 Generated ephemeral pubkey:', ephemeralPubkeyHex);
+
+  // Call WASI with ephemeral public key
+  const result = await callOutLayer('get_emails', {
+    ephemeral_pubkey: ephemeralPubkeyHex,
+    limit,
+    offset,
+  });
+
+  // Decrypt the response with ephemeral private key
+  const encryptedBase64 = result.encrypted_emails;
+  const encryptedBytes = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
+
+  const decryptedBytes = decrypt(ephemeralKey.secret, encryptedBytes);
+  const decryptedJson = new TextDecoder().decode(decryptedBytes);
+
+  console.log('🔓 Decrypted emails');
+
+  return JSON.parse(decryptedJson) as Email[];
 }
 
 export async function sendEmail(to: string, subject: string, body: string): Promise<void> {

@@ -73,13 +73,20 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
 
     match input {
         Request::GetEmails {
+            ephemeral_pubkey,
             limit,
             offset,
         } => {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+
             // Get authenticated signer
             let account_id = get_signer()?;
 
-            // Derive user's private key
+            // Parse client's ephemeral public key (hex -> bytes)
+            let ephemeral_pubkey_bytes = hex::decode(&ephemeral_pubkey)
+                .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?;
+
+            // Derive user's private key for decryption
             let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
 
             // Fetch encrypted emails from database
@@ -112,9 +119,17 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 }
             }
 
+            // Serialize emails to JSON
+            let emails_json = serde_json::to_vec(&emails)?;
+
+            // Re-encrypt with client's ephemeral public key
+            // This ensures the response is only readable by the client
+            let encrypted_response = ecies::encrypt(&ephemeral_pubkey_bytes, &emails_json)
+                .map_err(|e| format!("Failed to encrypt response: {}", e))?;
+
             Ok(Response::GetEmails(GetEmailsResponse {
                 success: true,
-                emails,
+                encrypted_emails: STANDARD.encode(&encrypted_response),
             }))
         }
 

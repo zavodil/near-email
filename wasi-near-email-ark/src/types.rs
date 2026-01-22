@@ -1,6 +1,16 @@
 //! Request/Response types for near.email WASI module
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialize base64-encoded string as Vec<u8>
+fn deserialize_base64<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let s: String = Deserialize::deserialize(deserializer)?;
+    STANDARD.decode(&s).map_err(serde::de::Error::custom)
+}
 
 // ==================== Request Types ====================
 
@@ -9,7 +19,11 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Request {
     /// Get emails for the signer (authenticated via NEAR transaction)
+    /// Response is encrypted with ephemeral_pubkey for client-side decryption
     GetEmails {
+        /// Client's ephemeral secp256k1 public key (hex, 33 bytes compressed)
+        /// WASI encrypts emails with this key, client decrypts with private key
+        ephemeral_pubkey: String,
         #[serde(default)]
         limit: Option<i64>,
         #[serde(default)]
@@ -51,7 +65,10 @@ pub enum Response {
 #[derive(Debug, Serialize)]
 pub struct GetEmailsResponse {
     pub success: bool,
-    pub emails: Vec<Email>,
+    /// Base64-encoded ECIES ciphertext containing JSON array of emails
+    /// Encrypted with client's ephemeral public key
+    /// Client decrypts with ephemeral private key to get Vec<Email>
+    pub encrypted_emails: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +119,7 @@ pub struct Email {
 pub struct EncryptedEmail {
     pub id: String,
     pub sender_email: String,
+    #[serde(deserialize_with = "deserialize_base64")]
     pub encrypted_data: Vec<u8>,
     pub received_at: String,
 }
