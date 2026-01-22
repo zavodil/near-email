@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_DB: near_email
       POSTGRES_USER: near_email
-      POSTGRES_PASSWORD: near_email_secret
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -24,7 +24,7 @@ services:
       context: ./smtp-server
       dockerfile: Dockerfile
     environment:
-      DATABASE_URL: postgres://near_email:near_email_secret@postgres:5432/near_email
+      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD}@postgres:5432/near_email
       MASTER_PUBLIC_KEY: ${MASTER_PUBLIC_KEY}
       SMTP_HOST: 0.0.0.0
       SMTP_PORT: 25
@@ -41,7 +41,7 @@ services:
       context: ./db-api
       dockerfile: Dockerfile
     environment:
-      DATABASE_URL: postgres://near_email:near_email_secret@postgres:5432/near_email
+      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD}@postgres:5432/near_email
       API_PORT: 8080
     ports:
       - "8080:8080"
