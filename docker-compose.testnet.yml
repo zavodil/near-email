@@ -1,5 +1,10 @@
 version: '3.8'
 
+# Docker Compose for TESTNET environment
+# Usage: docker-compose -f docker-compose.testnet.yml up -d
+#
+# vadim@near.email -> vadim.testnet (NEAR testnet account)
+
 services:
   # PostgreSQL database
   postgres:
@@ -7,9 +12,9 @@ services:
     environment:
       POSTGRES_DB: near_email
       POSTGRES_USER: near_email
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-testnet_password_123}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_testnet:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
@@ -24,11 +29,13 @@ services:
       context: ./smtp-server
       dockerfile: Dockerfile
     environment:
-      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD}@postgres:5432/near_email
+      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD:-testnet_password_123}@postgres:5432/near_email
       MASTER_PUBLIC_KEY: ${MASTER_PUBLIC_KEY}
       SMTP_HOST: 0.0.0.0
       SMTP_PORT: 25
       EMAIL_DOMAIN: near.email
+      # TESTNET: vadim@near.email -> vadim.testnet
+      DEFAULT_ACCOUNT_SUFFIX: .testnet
     ports:
       - "25:25"
     depends_on:
@@ -41,7 +48,7 @@ services:
       context: ./db-api
       dockerfile: Dockerfile
     environment:
-      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD}@postgres:5432/near_email
+      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD:-testnet_password_123}@postgres:5432/near_email
       API_PORT: 8080
       EMAIL_DOMAIN: near.email
       # DKIM signing for outgoing emails
@@ -59,11 +66,11 @@ services:
       context: ./web-ui
       dockerfile: Dockerfile
     environment:
-      NEXT_PUBLIC_NETWORK_ID: mainnet
-      NEXT_PUBLIC_OUTLAYER_API_URL: ${OUTLAYER_API_URL:-https://outlayer.xyz}
-      NEXT_PUBLIC_PROJECT_ID: near-email
+      NEXT_PUBLIC_NETWORK_ID: testnet
+      NEXT_PUBLIC_OUTLAYER_API_URL: ${OUTLAYER_API_URL:-https://testnet-api.outlayer.fastnear.com}
+      NEXT_PUBLIC_PROJECT_ID: near-email-testnet
     ports:
       - "3000:3000"
 
 volumes:
-  postgres_data:
+  postgres_data_testnet:

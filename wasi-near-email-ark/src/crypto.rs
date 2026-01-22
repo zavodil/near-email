@@ -2,7 +2,7 @@
 //!
 //! Implements private key derivation and email decryption.
 
-use secp256k1::{Scalar, SecretKey};
+use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 
 /// Domain separation prefix for key derivation
@@ -13,6 +13,14 @@ pub fn parse_private_key(hex_str: &str) -> Result<SecretKey, Box<dyn std::error:
     let bytes = hex::decode(hex_str)?;
     let privkey = SecretKey::from_slice(&bytes)?;
     Ok(privkey)
+}
+
+/// Derive master public key from master private key
+/// Returns compressed public key in hex format (33 bytes = 66 hex chars)
+pub fn get_master_pubkey(master_privkey: &SecretKey) -> String {
+    let secp = Secp256k1::new();
+    let pubkey = PublicKey::from_secret_key(&secp, master_privkey);
+    hex::encode(pubkey.serialize())
 }
 
 /// Derive a user-specific private key from master private key
@@ -51,4 +59,28 @@ pub fn decrypt_email(
     let decrypted = ecies::decrypt(&user_privkey.secret_bytes(), encrypted)
         .map_err(|e| format!("Decryption failed: {}", e))?;
     Ok(decrypted)
+}
+
+/// Derive user's public key from master private key
+/// Used for encrypting emails to other NEAR accounts
+pub fn derive_user_pubkey(
+    master_privkey: &SecretKey,
+    account_id: &str,
+) -> Result<PublicKey, Box<dyn std::error::Error>> {
+    let user_privkey = derive_user_privkey(master_privkey, account_id)?;
+    let secp = Secp256k1::new();
+    Ok(PublicKey::from_secret_key(&secp, &user_privkey))
+}
+
+/// Encrypt data for a specific NEAR account
+/// Used for internal email sending (NEAR to NEAR)
+pub fn encrypt_for_account(
+    master_privkey: &SecretKey,
+    account_id: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let user_pubkey = derive_user_pubkey(master_privkey, account_id)?;
+    let encrypted = ecies::encrypt(&user_pubkey.serialize(), data)
+        .map_err(|e| format!("Encryption failed: {}", e))?;
+    Ok(encrypted)
 }

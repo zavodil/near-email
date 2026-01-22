@@ -15,6 +15,8 @@ pub struct NearEmailHandler {
     db_pool: PgPool,
     master_pubkey: PublicKey,
     email_domain: String,
+    /// Default account suffix for simple addresses (e.g., ".near" or ".testnet")
+    default_account_suffix: String,
     // Transaction state
     current_from: Option<String>,
     current_to: Vec<String>,
@@ -22,11 +24,17 @@ pub struct NearEmailHandler {
 }
 
 impl NearEmailHandler {
-    pub fn new(db_pool: PgPool, master_pubkey: PublicKey, email_domain: String) -> Self {
+    pub fn new(
+        db_pool: PgPool,
+        master_pubkey: PublicKey,
+        email_domain: String,
+        default_account_suffix: String,
+    ) -> Self {
         Self {
             db_pool,
             master_pubkey,
             email_domain,
+            default_account_suffix,
             current_from: None,
             current_to: Vec::new(),
             current_data: Vec::new(),
@@ -34,21 +42,22 @@ impl NearEmailHandler {
     }
 
     /// Extract NEAR account ID from email address
-    /// e.g., "vadim@near.email" -> "vadim.near"
+    /// e.g., "vadim@near.email" -> "vadim.near" (mainnet) or "vadim.testnet" (testnet)
+    /// e.g., "vadim.testnet@near.email" -> "vadim.testnet" (explicit)
     fn extract_account_id(&self, email: &str) -> Option<String> {
         let email_lower = email.to_lowercase();
         let suffix = format!("@{}", self.email_domain);
 
         if email_lower.ends_with(&suffix) {
             let local_part = email_lower.strip_suffix(&suffix)?;
-            // Handle subdomains: vadim.testnet@near.email -> vadim.testnet
-            // Simple case: vadim@near.email -> vadim.near
+            // Handle explicit subdomains: vadim.testnet@near.email -> vadim.testnet
+            // Simple case: vadim@near.email -> vadim{default_suffix}
             if local_part.contains('.') {
-                // Already has suffix like testnet, keep as is
+                // Already has suffix like testnet/near, keep as is
                 Some(local_part.to_string())
             } else {
-                // Add .near suffix
-                Some(format!("{}.near", local_part))
+                // Add default suffix (.near for mainnet, .testnet for testnet)
+                Some(format!("{}{}", local_part, self.default_account_suffix))
             }
         } else {
             None

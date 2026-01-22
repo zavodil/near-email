@@ -10,17 +10,39 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
+use hickory_resolver::{config::*, TokioAsyncResolver};
+use lettre::{
+    message::{header::ContentType, Mailbox},
+    transport::smtp::client::{Tls, TlsParameters},
+    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+};
+use mail_auth::{
+    common::crypto::{RsaKey, Sha256 as DkimSha256},
+    common::headers::HeaderWriter,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{info, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use uuid::Uuid;
 
-#[derive(Clone)]
+/// DKIM configuration for signing outgoing emails
+struct DkimConfig {
+    /// RSA private key PEM for signing
+    private_key_pem: String,
+    /// Domain to sign for (e.g., "near.email")
+    domain: String,
+    /// Selector (e.g., "mail" for mail._domainkey.near.email)
+    selector: String,
+}
+
 struct AppState {
     db: PgPool,
+    email_domain: String,
+    resolver: TokioAsyncResolver,
+    dkim: Option<DkimConfig>,
 }
 
 #[tokio::main]
@@ -45,7 +67,41 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Connected to database");
 
-    let state = AppState { db };
+    // Get email domain for outgoing emails
+    let email_domain = env::var("EMAIL_DOMAIN").unwrap_or_else(|_| "near.email".to_string());
+
+    // Create DNS resolver for MX lookups
+    let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+
+    // Load DKIM private key for signing outgoing emails
+    let dkim = match env::var("DKIM_PRIVATE_KEY") {
+        Ok(key_pem) if !key_pem.is_empty() => {
+            let selector = env::var("DKIM_SELECTOR").unwrap_or_else(|_| "mail".to_string());
+            // Validate the key can be parsed (try RSA PEM format)
+            match RsaKey::<DkimSha256>::from_rsa_pem(&key_pem) {
+                Ok(_) => {
+                    info!("DKIM signing enabled with selector '{}' for domain '{}'", selector, email_domain);
+                    Some(DkimConfig {
+                        private_key_pem: key_pem,
+                        domain: email_domain.clone(),
+                        selector,
+                    })
+                }
+                Err(e) => {
+                    error!("Failed to parse DKIM private key: {}. DKIM signing disabled.", e);
+                    None
+                }
+            }
+        }
+        _ => {
+            warn!("DKIM_PRIVATE_KEY not set. Outgoing emails will not be DKIM signed.");
+            None
+        }
+    };
+
+    info!("Email domain: {}", email_domain);
+
+    let state = AppState { db, email_domain, resolver, dkim };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -57,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/emails/count", get(count_emails))
         .route("/emails/:id", delete(delete_email))
         .route("/send", post(send_email))
+        .route("/internal-store", post(store_internal_email))
         .route("/health", get(health))
         .layer(cors)
         .with_state(Arc::new(state));
@@ -134,6 +191,39 @@ struct SendEmailBody {
 #[derive(Debug, Serialize)]
 struct SendResponse {
     success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Request to store an internal (pre-encrypted) email
+#[derive(Debug, Deserialize)]
+struct StoreInternalEmailBody {
+    recipient: String,
+    sender_email: String,
+    #[serde(with = "base64_serde_de")]
+    encrypted_data: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+struct StoreInternalResponse {
+    success: bool,
+    id: String,
+}
+
+// Base64 deserialization helper
+mod base64_serde_de {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        STANDARD
+            .decode(&s)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 // Base64 serialization helper
@@ -237,14 +327,249 @@ async fn delete_email(
 }
 
 async fn send_email(
+    State(state): State<Arc<AppState>>,
     Json(body): Json<SendEmailBody>,
 ) -> Result<Json<SendResponse>, StatusCode> {
-    // TODO: Implement SMTP sending
-    // For now, just log and return success
     info!(
         "Send email request: from={}, to={}, subject={}",
         body.from_account, body.to, body.subject
     );
 
-    Ok(Json(SendResponse { success: true }))
+    // Build from address
+    let from_email = format!("{}@{}", body.from_account, state.email_domain);
+    let from_mailbox: Mailbox = from_email
+        .parse()
+        .map_err(|e| {
+            error!("Invalid from address {}: {}", from_email, e);
+            StatusCode::BAD_REQUEST
+        })?;
+
+    // Parse to address
+    let to_mailbox: Mailbox = body.to
+        .parse()
+        .map_err(|e| {
+            error!("Invalid to address {}: {}", body.to, e);
+            StatusCode::BAD_REQUEST
+        })?;
+
+    // Extract recipient domain for MX lookup
+    let to_domain = body.to
+        .split('@')
+        .nth(1)
+        .ok_or_else(|| {
+            error!("No domain in to address: {}", body.to);
+            StatusCode::BAD_REQUEST
+        })?;
+
+    // Build email message
+    let email = Message::builder()
+        .from(from_mailbox.clone())
+        .to(to_mailbox.clone())
+        .subject(&body.subject)
+        .header(ContentType::TEXT_PLAIN)
+        .body(body.body.clone())
+        .map_err(|e| {
+            error!("Failed to build email: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Lookup MX records
+    let mx_records = state.resolver
+        .mx_lookup(to_domain)
+        .await
+        .map_err(|e| {
+            error!("MX lookup failed for {}: {}", to_domain, e);
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    // Get the highest priority MX server (lowest preference number)
+    let mx_host = mx_records
+        .iter()
+        .min_by_key(|mx| mx.preference())
+        .map(|mx| mx.exchange().to_string().trim_end_matches('.').to_string())
+        .ok_or_else(|| {
+            error!("No MX records found for {}", to_domain);
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    info!("Using MX server {} for {}", mx_host, to_domain);
+
+    // Sign with DKIM and send, or send unsigned
+    let send_result = if let Some(dkim) = &state.dkim {
+        match sign_email_dkim(&email, dkim) {
+            Ok(signed_bytes) => {
+                info!("Email DKIM signed successfully");
+                // Create envelope for raw sending
+                match lettre::address::Envelope::new(
+                    Some(from_mailbox.email.clone()),
+                    vec![to_mailbox.email.clone()],
+                ) {
+                    Ok(envelope) => send_via_smtp_raw(&mx_host, &envelope, &signed_bytes).await,
+                    Err(e) => Err(format!("Failed to create envelope: {}", e)),
+                }
+            }
+            Err(e) => {
+                warn!("DKIM signing failed, sending unsigned: {}", e);
+                send_via_smtp(&mx_host, &email).await
+            }
+        }
+    } else {
+        send_via_smtp(&mx_host, &email).await
+    };
+
+    match send_result {
+        Ok(_) => {
+            info!("Email sent successfully to {} via {}", body.to, mx_host);
+            Ok(Json(SendResponse { success: true, error: None }))
+        }
+        Err(e) => {
+            error!("Failed to send email to {} via {}: {}", body.to, mx_host, e);
+            Ok(Json(SendResponse {
+                success: false,
+                error: Some(format!("SMTP error: {}", e))
+            }))
+        }
+    }
+}
+
+/// Sign email with DKIM and return raw signed bytes
+fn sign_email_dkim(email: &Message, dkim: &DkimConfig) -> Result<Vec<u8>, String> {
+    use mail_auth::dkim::DkimSigner;
+
+    // Get raw email bytes
+    let raw_email = email.formatted();
+
+    // Create RSA key from PEM
+    let pk = RsaKey::<DkimSha256>::from_rsa_pem(&dkim.private_key_pem)
+        .map_err(|e| format!("Failed to parse DKIM key: {}", e))?;
+
+    // Create DKIM signer
+    let signer = DkimSigner::from_key(pk)
+        .domain(&dkim.domain)
+        .selector(&dkim.selector)
+        .headers(["From", "To", "Subject", "Date", "Message-ID"])
+        .sign(&raw_email)
+        .map_err(|e| format!("DKIM signing failed: {}", e))?;
+
+    // Get the DKIM-Signature header
+    let dkim_header = signer.to_header();
+
+    // Prepend DKIM-Signature header to the message
+    let signed_raw = format!("{}{}", dkim_header, String::from_utf8_lossy(&raw_email));
+
+    Ok(signed_raw.into_bytes())
+}
+
+/// Send email via SMTP with TLS
+async fn send_via_smtp(mx_host: &str, email: &Message) -> Result<(), String> {
+    // Try STARTTLS first (port 25 with upgrade)
+    let tls_params = TlsParameters::builder(mx_host.to_string())
+        .dangerous_accept_invalid_certs(false)
+        .build()
+        .map_err(|e| format!("TLS params error: {}", e))?;
+
+    // Try with STARTTLS (standard for MX servers)
+    let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(mx_host)
+        .map_err(|e| format!("SMTP relay error: {}", e))?
+        .tls(Tls::Required(tls_params.clone()))
+        .timeout(Some(std::time::Duration::from_secs(30)))
+        .build();
+
+    match mailer.send(email.clone()).await {
+        Ok(_) => return Ok(()),
+        Err(e) => {
+            warn!("STARTTLS failed for {}, trying opportunistic: {}", mx_host, e);
+        }
+    }
+
+    // Fall back to opportunistic TLS (try TLS but allow plaintext)
+    let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(mx_host)
+        .map_err(|e| format!("SMTP relay error: {}", e))?
+        .tls(Tls::Opportunistic(tls_params))
+        .timeout(Some(std::time::Duration::from_secs(30)))
+        .build();
+
+    mailer
+        .send(email.clone())
+        .await
+        .map_err(|e| format!("SMTP send error: {}", e))?;
+
+    Ok(())
+}
+
+/// Send raw email bytes via SMTP (for DKIM-signed messages)
+async fn send_via_smtp_raw(
+    mx_host: &str,
+    envelope: &lettre::address::Envelope,
+    raw_email: &[u8],
+) -> Result<(), String> {
+    // Try STARTTLS first (port 25 with upgrade)
+    let tls_params = TlsParameters::builder(mx_host.to_string())
+        .dangerous_accept_invalid_certs(false)
+        .build()
+        .map_err(|e| format!("TLS params error: {}", e))?;
+
+    // Try with STARTTLS (standard for MX servers)
+    let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(mx_host)
+        .map_err(|e| format!("SMTP relay error: {}", e))?
+        .tls(Tls::Required(tls_params.clone()))
+        .timeout(Some(std::time::Duration::from_secs(30)))
+        .build();
+
+    match mailer.send_raw(envelope, raw_email).await {
+        Ok(_) => return Ok(()),
+        Err(e) => {
+            warn!("STARTTLS failed for {}, trying opportunistic: {}", mx_host, e);
+        }
+    }
+
+    // Fall back to opportunistic TLS
+    let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(mx_host)
+        .map_err(|e| format!("SMTP relay error: {}", e))?
+        .tls(Tls::Opportunistic(tls_params))
+        .timeout(Some(std::time::Duration::from_secs(30)))
+        .build();
+
+    mailer
+        .send_raw(envelope, raw_email)
+        .await
+        .map_err(|e| format!("SMTP send error: {}", e))?;
+
+    Ok(())
+}
+
+/// Store an internal email (already encrypted by WASI module)
+/// Used for NEAR-to-NEAR messaging without external SMTP
+async fn store_internal_email(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<StoreInternalEmailBody>,
+) -> Result<Json<StoreInternalResponse>, StatusCode> {
+    let id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO emails (id, recipient, sender_email, encrypted_data, received_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        "#,
+    )
+    .bind(id)
+    .bind(&body.recipient)
+    .bind(&body.sender_email)
+    .bind(&body.encrypted_data)
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to store internal email: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    info!(
+        "Stored internal email {} for {} from {}",
+        id, body.recipient, body.sender_email
+    );
+
+    Ok(Json(StoreInternalResponse {
+        success: true,
+        id: id.to_string(),
+    }))
 }

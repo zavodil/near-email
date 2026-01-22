@@ -42,9 +42,15 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
 
     let master_privkey = crypto::parse_private_key(&master_privkey_hex)?;
 
-    // Get database API URL
-    let db_api_url = std::env::var("DATABASE_API_URL")
-        .map_err(|_| "DATABASE_API_URL not configured")?;
+    // Helper to get database API URL (lazy, only when needed)
+    let get_db_api_url = || -> Result<String, Box<dyn std::error::Error>> {
+        std::env::var("DATABASE_API_URL")
+            .map_err(|_| "DATABASE_API_URL not configured".into())
+    };
+
+    // Default account suffix (.near for mainnet, .testnet for testnet)
+    let default_account_suffix = std::env::var("DEFAULT_ACCOUNT_SUFFIX")
+        .unwrap_or_else(|_| ".near".to_string());
 
     match input {
         Request::GetEmails {
@@ -63,7 +69,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
 
             // Fetch encrypted emails from database
             let encrypted_emails = db::fetch_emails(
-                &db_api_url,
+                &get_db_api_url()?,
                 &account_id,
                 limit.unwrap_or(50),
                 offset.unwrap_or(0),
@@ -109,13 +115,47 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             // Verify NEAR signature
             near::verify_signature(&account_id, &message, &signature, &public_key)?;
 
-            // Send email via SMTP relay
-            db::send_email(&db_api_url, &account_id, &to, &subject, &body)?;
+            // Check if internal email (@near.email)
+            let internal_suffix = "@near.email";
+            if to.to_lowercase().ends_with(internal_suffix) {
+                // Internal email - encrypt and store directly
+                let recipient_account = extract_account_from_email(&to, internal_suffix, &default_account_suffix);
 
-            Ok(Response::SendEmail(SendEmailResponse {
-                success: true,
-                message_id: None, // Could be returned from SMTP relay
-            }))
+                // Build email content (simple format)
+                let email_content = format!(
+                    "From: {}@near.email\r\nTo: {}\r\nSubject: {}\r\n\r\n{}",
+                    account_id, to, subject, body
+                );
+
+                // Encrypt for recipient
+                let encrypted = crypto::encrypt_for_account(
+                    &master_privkey,
+                    &recipient_account,
+                    email_content.as_bytes(),
+                )?;
+
+                // Store in database
+                let sender_email = format!("{}@near.email", account_id);
+                let email_id = db::store_internal_email(
+                    &get_db_api_url()?,
+                    &recipient_account,
+                    &sender_email,
+                    &encrypted,
+                )?;
+
+                Ok(Response::SendEmail(SendEmailResponse {
+                    success: true,
+                    message_id: Some(email_id),
+                }))
+            } else {
+                // External email - send via SMTP relay
+                db::send_email(&get_db_api_url()?, &account_id, &to, &subject, &body)?;
+
+                Ok(Response::SendEmail(SendEmailResponse {
+                    success: true,
+                    message_id: None,
+                }))
+            }
         }
 
         Request::DeleteEmail {
@@ -129,7 +169,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             near::verify_signature(&account_id, &message, &signature, &public_key)?;
 
             // Delete email from database
-            let deleted = db::delete_email(&db_api_url, &email_id, &account_id)?;
+            let deleted = db::delete_email(&get_db_api_url()?, &email_id, &account_id)?;
 
             Ok(Response::DeleteEmail(DeleteEmailResponse {
                 success: true,
@@ -147,11 +187,22 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             near::verify_signature(&account_id, &message, &signature, &public_key)?;
 
             // Get email count
-            let count = db::count_emails(&db_api_url, &account_id)?;
+            let count = db::count_emails(&get_db_api_url()?, &account_id)?;
 
             Ok(Response::GetEmailCount(GetEmailCountResponse {
                 success: true,
                 count,
+            }))
+        }
+
+        Request::GetMasterPublicKey => {
+            // Return master public key for SMTP server encryption
+            // No authentication needed - public key is safe to share
+            let pubkey_hex = crypto::get_master_pubkey(&master_privkey);
+
+            Ok(Response::GetMasterPublicKey(GetMasterPublicKeyResponse {
+                success: true,
+                public_key: pubkey_hex,
             }))
         }
     }
@@ -176,4 +227,23 @@ fn parse_email(data: &[u8]) -> Result<ParsedEmail, Box<dyn std::error::Error>> {
 struct ParsedEmail {
     subject: String,
     body: String,
+}
+
+/// Extract NEAR account ID from email address
+/// e.g., "vadim@near.email" -> "vadim.near" (mainnet) or "vadim.testnet" (testnet)
+/// e.g., "vadim.testnet@near.email" -> "vadim.testnet" (explicit)
+fn extract_account_from_email(email: &str, email_suffix: &str, default_account_suffix: &str) -> String {
+    let email_lower = email.to_lowercase();
+    let local_part = email_lower
+        .strip_suffix(email_suffix)
+        .unwrap_or(&email_lower)
+        .to_string();
+
+    // If already has a dot (e.g., vadim.testnet), keep as is
+    // Otherwise add default suffix (.near or .testnet)
+    if local_part.contains('.') {
+        local_part
+    } else {
+        format!("{}{}", local_part, default_account_suffix)
+    }
 }

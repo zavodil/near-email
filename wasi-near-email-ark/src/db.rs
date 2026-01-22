@@ -111,3 +111,40 @@ pub fn count_emails(
 
     Ok(result.count)
 }
+
+/// Store internal email (already encrypted)
+/// Used for NEAR-to-NEAR messaging without external SMTP
+pub fn store_internal_email(
+    api_url: &str,
+    recipient: &str,
+    sender_email: &str,
+    encrypted_data: &[u8],
+) -> Result<String, Box<dyn std::error::Error>> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let url = format!("{}/internal-store", api_url);
+
+    let payload = serde_json::json!({
+        "recipient": recipient,
+        "sender_email": sender_email,
+        "encrypted_data": STANDARD.encode(encrypted_data),
+    });
+
+    let client = Client::new();
+    let request = Request::new(Method::Post, &url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_vec(&payload)?);
+
+    let response = client.send(request)?;
+
+    if response.status() != 200 {
+        return Err(format!("Store internal email failed: {}", response.status()).into());
+    }
+
+    // Parse response to get the email ID
+    let body = response.body();
+    let result: serde_json::Value = serde_json::from_slice(body)?;
+    let id = result["id"].as_str().unwrap_or("unknown").to_string();
+
+    Ok(id)
+}

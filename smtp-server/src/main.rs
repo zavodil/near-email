@@ -39,12 +39,14 @@ async fn main() -> Result<()> {
         .parse()
         .expect("SMTP_PORT must be a valid port number");
     let email_domain = env::var("EMAIL_DOMAIN").unwrap_or_else(|_| "near.email".to_string());
+    let default_account_suffix = env::var("DEFAULT_ACCOUNT_SUFFIX")
+        .unwrap_or_else(|_| ".near".to_string());
 
     // Parse master public key
     let master_pubkey = crypto::parse_public_key(&master_pubkey_hex)
         .expect("Invalid MASTER_PUBLIC_KEY");
 
-    info!("Master public key loaded");
+    info!("Master public key loaded (default suffix: {})", default_account_suffix);
 
     // Connect to database
     let db_pool = PgPoolOptions::new()
@@ -63,6 +65,7 @@ async fn main() -> Result<()> {
         db_pool,
         master_pubkey,
         email_domain,
+        default_account_suffix,
     );
 
     // Start SMTP server

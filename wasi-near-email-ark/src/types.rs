@@ -47,6 +47,10 @@ pub enum Request {
         public_key: String,
         message: String,
     },
+
+    /// Get master public key (for SMTP server encryption)
+    /// No authentication required - public key is safe to share
+    GetMasterPublicKey,
 }
 
 // ==================== Response Types ====================
@@ -58,6 +62,7 @@ pub enum Response {
     SendEmail(SendEmailResponse),
     DeleteEmail(DeleteEmailResponse),
     GetEmailCount(GetEmailCountResponse),
+    GetMasterPublicKey(GetMasterPublicKeyResponse),
 }
 
 #[derive(Debug, Serialize)]
@@ -83,6 +88,13 @@ pub struct DeleteEmailResponse {
 pub struct GetEmailCountResponse {
     pub success: bool,
     pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetMasterPublicKeyResponse {
+    pub success: bool,
+    /// Compressed secp256k1 public key in hex (33 bytes = 66 hex chars)
+    pub public_key: String,
 }
 
 #[derive(Debug, Serialize)]
