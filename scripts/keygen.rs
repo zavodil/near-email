@@ -54,7 +54,7 @@ fn main() {{
     let secp = Secp256k1::new();
     let (secret_key, public_key) = secp.generate_keypair(&mut OsRng);
 
-    println!("MASTER_PRIVATE_KEY={{}}", hex::encode(secret_key.secret_bytes()));
+    println!("PROTECTED_MASTER_KEY={{}}", hex::encode(secret_key.secret_bytes()));
     println!("MASTER_PUBLIC_KEY={{}}", hex::encode(public_key.serialize()));
 }}
 "#);

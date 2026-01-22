@@ -88,7 +88,7 @@ docker-compose up -d
 
 ```bash
 ./scripts/generate_keys.sh
-# Save MASTER_PRIVATE_KEY for OutLayer secrets
+# Save PROTECTED_MASTER_KEY for OutLayer secrets
 # Save MASTER_PUBLIC_KEY for smtp-server/.env
 ```
 
@@ -114,7 +114,7 @@ DATABASE_URL=postgres://... cargo run
 cd wasi-near-email-ark
 ./build.sh
 # Deploy to OutLayer with secrets:
-#   MASTER_PRIVATE_KEY=...
+#   PROTECTED_MASTER_KEY=...
 #   DATABASE_API_URL=https://your-db-api-url
 ```
 
@@ -140,7 +140,7 @@ npm run dev
 
 | Variable | Description |
 |----------|-------------|
-| `MASTER_PRIVATE_KEY` | Hex-encoded secp256k1 private key |
+| `PROTECTED_MASTER_KEY` | Hex-encoded secp256k1 private key |
 | `DATABASE_API_URL` | HTTP API URL for database access |
 
 ## DNS Configuration

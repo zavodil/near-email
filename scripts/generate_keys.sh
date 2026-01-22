@@ -3,7 +3,7 @@
 #
 # This uses Rust with secp256k1 crate to generate proper keys.
 # The keys should be stored securely:
-#   - MASTER_PRIVATE_KEY: Only in OutLayer TEE secrets
+#   - PROTECTED_MASTER_KEY: Only in OutLayer TEE secrets
 #   - MASTER_PUBLIC_KEY: In SMTP server .env
 
 set -e
@@ -43,7 +43,7 @@ fn main() {
     eprintln!();
 
     println!("# Add to OutLayer secrets:");
-    println!("MASTER_PRIVATE_KEY={}", hex::encode(secret_key.secret_bytes()));
+    println!("PROTECTED_MASTER_KEY={}", hex::encode(secret_key.secret_bytes()));
     println!();
     println!("# Add to smtp-server/.env:");
     println!("MASTER_PUBLIC_KEY={}", hex::encode(public_key.serialize()));

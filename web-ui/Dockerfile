@@ -2,6 +2,16 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Build args for Next.js (NEXT_PUBLIC_* must be set at build time)
+ARG NEXT_PUBLIC_NETWORK_ID=mainnet
+ARG NEXT_PUBLIC_OUTLAYER_API_URL=https://outlayer.xyz
+ARG NEXT_PUBLIC_PROJECT_ID=near-email
+
+# Set as env vars for build
+ENV NEXT_PUBLIC_NETWORK_ID=$NEXT_PUBLIC_NETWORK_ID
+ENV NEXT_PUBLIC_OUTLAYER_API_URL=$NEXT_PUBLIC_OUTLAYER_API_URL
+ENV NEXT_PUBLIC_PROJECT_ID=$NEXT_PUBLIC_PROJECT_ID
+
 COPY package*.json ./
 RUN npm install
 

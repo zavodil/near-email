@@ -11,10 +11,14 @@ mod db;
 mod near;
 mod types;
 
-use outlayer::env;
+use outlayer::{env, storage};
 use types::*;
 
 fn main() {
+    // Force storage interface import by actually calling it (required for project context)
+    // This ensures the linker includes the near:storage/api interface
+    let _ = storage::has("_init");
+
     let result = process();
 
     match result {
@@ -36,9 +40,9 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
     let input: Request = env::input_json()?
         .ok_or("No input provided")?;
 
-    // Get master private key from secrets
-    let master_privkey_hex = std::env::var("MASTER_PRIVATE_KEY")
-        .map_err(|_| "MASTER_PRIVATE_KEY not configured")?;
+    // Get master private key from secrets (PRIVATE_ prefix for OutLayer private secrets)
+    let master_privkey_hex = std::env::var("PROTECTED_MASTER_KEY")
+        .map_err(|_| "PROTECTED_MASTER_KEY not configured")?;
 
     let master_privkey = crypto::parse_private_key(&master_privkey_hex)?;
 

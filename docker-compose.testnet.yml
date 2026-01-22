@@ -65,10 +65,10 @@ services:
     build:
       context: ./web-ui
       dockerfile: Dockerfile
-    environment:
-      NEXT_PUBLIC_NETWORK_ID: testnet
-      NEXT_PUBLIC_OUTLAYER_API_URL: ${OUTLAYER_API_URL:-https://testnet-api.outlayer.fastnear.com}
-      NEXT_PUBLIC_PROJECT_ID: near-email-testnet
+      args:
+        NEXT_PUBLIC_NETWORK_ID: testnet
+        NEXT_PUBLIC_OUTLAYER_API_URL: ${OUTLAYER_API_URL:-https://testnet-api.outlayer.fastnear.com}
+        NEXT_PUBLIC_PROJECT_ID: near-email-testnet
     ports:
       - "3000:3000"
 

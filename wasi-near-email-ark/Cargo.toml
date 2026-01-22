@@ -35,6 +35,8 @@ base64 = "0.21"
 mailparse = "0.15"
 
 [profile.release]
-opt-level = "s"
-lto = true
-strip = true
+opt-level = "z"        # Optimize for size (more aggressive than "s")
+lto = true             # Link-time optimization
+strip = true           # Strip symbols
+codegen-units = 1      # Better optimization (slower compile)
+panic = "abort"        # No unwinding code
