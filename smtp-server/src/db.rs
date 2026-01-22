@@ -1,20 +1,8 @@
 //! Database operations for near.email
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool};
+use sqlx::PgPool;
 use uuid::Uuid;
-
-/// Email record in database
-#[derive(Debug, Clone, FromRow)]
-pub struct EmailRecord {
-    pub id: Uuid,
-    pub recipient: String,
-    pub sender_email: String,
-    pub subject_hint: Option<String>,
-    pub encrypted_data: Vec<u8>,
-    pub received_at: DateTime<Utc>,
-}
 
 /// Run database migrations
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
@@ -78,79 +66,4 @@ pub async fn store_email(
     .await?;
 
     Ok(id)
-}
-
-/// Get emails for a recipient (encrypted)
-pub async fn get_emails_for_recipient(
-    pool: &PgPool,
-    recipient: &str,
-    limit: i64,
-    offset: i64,
-) -> Result<Vec<EmailRecord>> {
-    let records: Vec<EmailRecord> = sqlx::query_as(
-        r#"
-        SELECT id, recipient, sender_email, subject_hint, encrypted_data, received_at
-        FROM emails
-        WHERE recipient = $1
-        ORDER BY received_at DESC
-        LIMIT $2 OFFSET $3
-        "#,
-    )
-    .bind(recipient)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(records)
-}
-
-/// Mark emails as fetched
-pub async fn mark_emails_fetched(pool: &PgPool, ids: &[Uuid]) -> Result<()> {
-    if ids.is_empty() {
-        return Ok(());
-    }
-
-    sqlx::query(
-        r#"
-        UPDATE emails
-        SET fetched_at = NOW()
-        WHERE id = ANY($1)
-        "#,
-    )
-    .bind(ids)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-/// Delete email by id (for owner only)
-pub async fn delete_email(pool: &PgPool, id: Uuid, recipient: &str) -> Result<bool> {
-    let result = sqlx::query(
-        r#"
-        DELETE FROM emails
-        WHERE id = $1 AND recipient = $2
-        "#,
-    )
-    .bind(id)
-    .bind(recipient)
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected() > 0)
-}
-
-/// Count emails for recipient
-pub async fn count_emails(pool: &PgPool, recipient: &str) -> Result<i64> {
-    let count: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COUNT(*) FROM emails WHERE recipient = $1
-        "#,
-    )
-    .bind(recipient)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(count.0)
 }

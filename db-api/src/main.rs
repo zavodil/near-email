@@ -11,7 +11,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, Level};
@@ -83,6 +83,14 @@ struct GetEmailsQuery {
 
 fn default_limit() -> i64 {
     50
+}
+
+#[derive(Debug, FromRow)]
+struct EmailRow {
+    id: Uuid,
+    sender_email: String,
+    encrypted_data: Vec<u8>,
+    received_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,7 +170,7 @@ async fn get_emails(
     State(state): State<Arc<AppState>>,
     Query(query): Query<GetEmailsQuery>,
 ) -> Result<Json<EmailsResponse>, StatusCode> {
-    let rows = sqlx::query!(
+    let rows: Vec<EmailRow> = sqlx::query_as(
         r#"
         SELECT id, sender_email, encrypted_data, received_at
         FROM emails
@@ -170,10 +178,10 @@ async fn get_emails(
         ORDER BY received_at DESC
         LIMIT $2 OFFSET $3
         "#,
-        query.recipient,
-        query.limit,
-        query.offset
     )
+    .bind(&query.recipient)
+    .bind(query.limit)
+    .bind(query.offset)
     .fetch_all(&state.db)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
