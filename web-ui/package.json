@@ -1,0 +1,33 @@
+{
+  "name": "near-email-ui",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@near-wallet-selector/core": "^8.9.0",
+    "@near-wallet-selector/modal-ui": "^8.9.0",
+    "@near-wallet-selector/my-near-wallet": "^8.9.0",
+    "@near-wallet-selector/here-wallet": "^8.9.0",
+    "@near-wallet-selector/meteor-wallet": "^8.9.0",
+    "@near-js/crypto": "^1.2.0",
+    "@near-js/transactions": "^1.2.0",
+    "near-api-js": "^4.0.0",
+    "next": "14.0.4",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.32",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.3.0"
+  }
+}

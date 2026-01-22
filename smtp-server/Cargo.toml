@@ -1,0 +1,44 @@
+[package]
+name = "smtp-server"
+version = "0.1.0"
+edition = "2021"
+description = "SMTP server for near.email - encrypts incoming emails for NEAR accounts"
+
+[[bin]]
+name = "smtp-server"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# SMTP server
+mailin-embedded = "0.8"
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono"] }
+
+# Cryptography
+secp256k1 = { version = "0.29", features = ["global-context"] }
+ecies = "0.2"
+sha2 = "0.10"
+hex = "0.4"
+
+# Email parsing
+mail-parser = "0.9"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = true

@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: near_email
+      POSTGRES_USER: near_email
+      POSTGRES_PASSWORD: near_email_secret
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U near_email"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # SMTP Server
+  smtp-server:
+    build:
+      context: ./smtp-server
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgres://near_email:near_email_secret@postgres:5432/near_email
+      MASTER_PUBLIC_KEY: ${MASTER_PUBLIC_KEY}
+      SMTP_HOST: 0.0.0.0
+      SMTP_PORT: 25
+      EMAIL_DOMAIN: near.email
+    ports:
+      - "25:25"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Database API (for WASI module HTTP access)
+  db-api:
+    build:
+      context: ./db-api
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgres://near_email:near_email_secret@postgres:5432/near_email
+      API_PORT: 8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Web UI
+  web-ui:
+    build:
+      context: ./web-ui
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_NETWORK_ID: mainnet
+      NEXT_PUBLIC_OUTLAYER_API_URL: ${OUTLAYER_API_URL:-https://outlayer.xyz}
+      NEXT_PUBLIC_PROJECT_ID: near-email
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:
