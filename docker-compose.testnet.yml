@@ -47,18 +47,17 @@ services:
     build:
       context: ./db-api
       dockerfile: Dockerfile
+    # Use host network to avoid IPv6 issues in docker bridge
+    network_mode: host
     environment:
-      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD:-testnet_password_123}@postgres:5432/near_email
+      # localhost because we're on host network
+      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD:-testnet_password_123}@localhost:5432/near_email
       API_PORT: 8080
       EMAIL_DOMAIN: near.email
       # DKIM signing for outgoing emails
       DKIM_PRIVATE_KEY: ${DKIM_PRIVATE_KEY}
       DKIM_SELECTOR: ${DKIM_SELECTOR:-mail}
-    ports:
-      - "8080:8080"
-    # Disable IPv6 - OVH VPS doesn't have IPv6 connectivity, but DNS returns IPv6 first
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=1
+    # ports not needed with network_mode: host (8080 exposed directly)
     depends_on:
       postgres:
         condition: service_healthy
