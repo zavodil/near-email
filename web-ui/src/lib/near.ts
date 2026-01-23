@@ -5,7 +5,7 @@ import { setupHereWallet } from '@near-wallet-selector/here-wallet';
 import { setupMeteorWallet } from '@near-wallet-selector/meteor-wallet';
 import type { WalletSelector, AccountState } from '@near-wallet-selector/core';
 import { actionCreators } from '@near-js/transactions';
-import { PrivateKey, decrypt } from 'eciesjs';
+import { PrivateKey, decrypt, encrypt } from 'eciesjs';
 
 // Configuration
 const NETWORK_ID = process.env.NEXT_PUBLIC_NETWORK_ID || 'mainnet';
@@ -17,6 +17,10 @@ const SECRETS_ACCOUNT_ID = process.env.NEXT_PUBLIC_SECRETS_ACCOUNT_ID || '';
 
 let selector: WalletSelector | null = null;
 let modal: ReturnType<typeof setupModal> | null = null;
+
+// Cached send pubkey for encrypting outgoing emails
+// Set by getEmails(), required by sendEmail()
+let cachedSendPubkey: string | null = null;
 
 export async function initWalletSelector(): Promise<WalletSelector> {
   if (selector) return selector;
@@ -182,6 +186,12 @@ export async function getEmails(limit = 50, offset = 0): Promise<Email[]> {
     offset,
   });
 
+  // Save send_pubkey for encrypting outgoing emails
+  if (result.send_pubkey) {
+    cachedSendPubkey = result.send_pubkey;
+    console.log('🔑 Cached send_pubkey for outgoing emails');
+  }
+
   // Decrypt the response with ephemeral private key
   const encryptedBase64 = result.encrypted_emails;
   const encryptedBytes = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
@@ -194,8 +204,34 @@ export async function getEmails(limit = 50, offset = 0): Promise<Email[]> {
   return JSON.parse(decryptedJson) as Email[];
 }
 
+/// Get the cached send pubkey (or null if not loaded yet)
+export function getSendPubkey(): string | null {
+  return cachedSendPubkey;
+}
+
 export async function sendEmail(to: string, subject: string, body: string): Promise<void> {
-  await callOutLayer('send_email', { to, subject, body });
+  if (!cachedSendPubkey) {
+    throw new Error('Send pubkey not available. Please refresh emails first.');
+  }
+
+  // Convert hex pubkey to bytes
+  const pubkeyBytes = Uint8Array.from(
+    cachedSendPubkey.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16))
+  );
+
+  // Encrypt subject and body with user's public key
+  const encryptedSubject = encrypt(pubkeyBytes, new TextEncoder().encode(subject));
+  const encryptedBody = encrypt(pubkeyBytes, new TextEncoder().encode(body));
+
+  // Convert to base64
+  const encryptedSubjectB64 = btoa(String.fromCharCode(...encryptedSubject));
+  const encryptedBodyB64 = btoa(String.fromCharCode(...encryptedBody));
+
+  await callOutLayer('send_email', {
+    to,
+    encrypted_subject: encryptedSubjectB64,
+    encrypted_body: encryptedBodyB64,
+  });
 }
 
 export async function deleteEmail(emailId: string): Promise<boolean> {

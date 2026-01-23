@@ -127,19 +127,43 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             let encrypted_response = ecies::encrypt(&ephemeral_pubkey_bytes, &emails_json)
                 .map_err(|e| format!("Failed to encrypt response: {}", e))?;
 
+            // Get signer's public key for encrypting outgoing emails
+            let send_pubkey = crypto::derive_user_pubkey(&master_privkey, &account_id)?;
+            let send_pubkey_hex = hex::encode(&send_pubkey);
+
             Ok(Response::GetEmails(GetEmailsResponse {
                 success: true,
                 encrypted_emails: STANDARD.encode(&encrypted_response),
+                send_pubkey: send_pubkey_hex,
             }))
         }
 
         Request::SendEmail {
             to,
-            subject,
-            body,
+            encrypted_subject,
+            encrypted_body,
         } => {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+
             // Get authenticated signer
             let account_id = get_signer()?;
+
+            // Derive user's private key for decryption
+            let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
+
+            // Decrypt subject and body
+            let subject_ciphertext = STANDARD.decode(&encrypted_subject)
+                .map_err(|e| format!("Invalid encrypted_subject base64: {}", e))?;
+            let body_ciphertext = STANDARD.decode(&encrypted_body)
+                .map_err(|e| format!("Invalid encrypted_body base64: {}", e))?;
+
+            let subject_bytes = crypto::decrypt_email(&user_privkey, &subject_ciphertext)?;
+            let body_bytes = crypto::decrypt_email(&user_privkey, &body_ciphertext)?;
+
+            let subject = String::from_utf8(subject_bytes)
+                .map_err(|e| format!("Invalid UTF-8 in subject: {}", e))?;
+            let body = String::from_utf8(body_bytes)
+                .map_err(|e| format!("Invalid UTF-8 in body: {}", e))?;
 
             // Check if internal email (@near.email)
             let internal_suffix = "@near.email";
@@ -236,9 +260,38 @@ fn parse_email(data: &[u8]) -> Result<ParsedEmail, Box<dyn std::error::Error>> {
         .map(|h| h.get_value())
         .unwrap_or_default();
 
-    let body = parsed.get_body()?;
+    // Try to get body - for simple emails it's in the main part,
+    // for multipart emails we need to check subparts
+    let body = if parsed.subparts.is_empty() {
+        parsed.get_body()?
+    } else {
+        // Find first text/plain or text/html part
+        find_body_part(&parsed).unwrap_or_default()
+    };
 
     Ok(ParsedEmail { subject, body })
+}
+
+/// Recursively find text body in email parts
+fn find_body_part(mail: &mailparse::ParsedMail) -> Option<String> {
+    // Check this part first
+    let ctype = mail.ctype.mimetype.to_lowercase();
+    if ctype.starts_with("text/plain") || ctype.starts_with("text/html") {
+        if let Ok(body) = mail.get_body() {
+            if !body.trim().is_empty() {
+                return Some(body);
+            }
+        }
+    }
+
+    // Check subparts
+    for part in &mail.subparts {
+        if let Some(body) = find_body_part(part) {
+            return Some(body);
+        }
+    }
+
+    None
 }
 
 struct ParsedEmail {

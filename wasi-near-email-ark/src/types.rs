@@ -31,10 +31,13 @@ pub enum Request {
     },
 
     /// Send email from the signer's account
+    /// Subject and body are encrypted with the signer's public key (from get_emails response)
     SendEmail {
         to: String,
-        subject: String,
-        body: String,
+        /// Base64-encoded ECIES ciphertext of subject
+        encrypted_subject: String,
+        /// Base64-encoded ECIES ciphertext of body
+        encrypted_body: String,
     },
 
     /// Delete an email (must belong to signer)
@@ -69,6 +72,9 @@ pub struct GetEmailsResponse {
     /// Encrypted with client's ephemeral public key
     /// Client decrypts with ephemeral private key to get Vec<Email>
     pub encrypted_emails: String,
+    /// Signer's public key (hex) for encrypting outgoing emails (subject, body)
+    /// Client must encrypt with this key before sending
+    pub send_pubkey: String,
 }
 
 #[derive(Debug, Serialize)]

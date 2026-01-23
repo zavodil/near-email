@@ -101,6 +101,10 @@ impl NearEmailHandler {
             let from_clone = from.to_string();
             let subject_clone = subject_hint.clone();
 
+            // Calculate sizes for logging (without exposing content)
+            let data_size = data.len();
+            let encrypted_size = encrypted.len();
+
             // Run async database operation on the saved Tokio runtime handle
             // (mailin_embedded runs handlers in a separate thread pool without Tokio context)
             self.rt_handle.block_on(async {
@@ -114,9 +118,10 @@ impl NearEmailHandler {
                 .await
                 {
                     Ok(id) => {
+                        // Log only metadata, not content (privacy)
                         info!(
-                            "Stored email {} for {} from {} (subject: {:?})",
-                            id, account_id_clone, from_clone, subject_clone
+                            "📧 Email {} stored: to={}, raw={}B, encrypted={}B",
+                            id, account_id_clone, data_size, encrypted_size
                         );
                     }
                     Err(e) => {

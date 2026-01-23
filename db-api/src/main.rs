@@ -77,6 +77,8 @@ async fn main() -> anyhow::Result<()> {
     let dkim = match env::var("DKIM_PRIVATE_KEY") {
         Ok(key_pem) if !key_pem.is_empty() => {
             let selector = env::var("DKIM_SELECTOR").unwrap_or_else(|_| "mail".to_string());
+            // Convert escaped newlines to actual newlines (common in .env files)
+            let key_pem = key_pem.replace("\\n", "\n");
             // Validate the key can be parsed (try RSA PEM format)
             match RsaKey::<DkimSha256>::from_rsa_pem(&key_pem) {
                 Ok(_) => {
@@ -330,9 +332,10 @@ async fn send_email(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SendEmailBody>,
 ) -> Result<Json<SendResponse>, StatusCode> {
+    // Log only metadata, not content (privacy)
     info!(
-        "Send email request: from={}, to={}, subject={}",
-        body.from_account, body.to, body.subject
+        "📤 Send email request: from={}, to={}, subject_len={}, body_len={}",
+        body.from_account, body.to, body.subject.len(), body.body.len()
     );
 
     // Build from address
@@ -564,8 +567,8 @@ async fn store_internal_email(
     })?;
 
     info!(
-        "Stored internal email {} for {} from {}",
-        id, body.recipient, body.sender_email
+        "📧 Internal email {} stored: to={}, from={}, encrypted={}B",
+        id, body.recipient, body.sender_email, body.encrypted_data.len()
     );
 
     Ok(Json(StoreInternalResponse {
