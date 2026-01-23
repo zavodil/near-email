@@ -56,6 +56,9 @@ services:
       DKIM_SELECTOR: ${DKIM_SELECTOR:-mail}
     ports:
       - "8080:8080"
+    # Disable IPv6 - OVH VPS doesn't have IPv6 connectivity, but DNS returns IPv6 first
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
     depends_on:
       postgres:
         condition: service_healthy
