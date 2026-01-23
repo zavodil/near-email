@@ -14,7 +14,10 @@ use hickory_resolver::{config::*, TokioAsyncResolver};
 use std::net::IpAddr;
 use lettre::{
     message::{header::ContentType, Mailbox},
-    transport::smtp::client::{Tls, TlsParameters},
+    transport::smtp::{
+        client::{Tls, TlsParameters},
+        extension::ClientId,
+    },
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 use mail_auth::{
@@ -367,11 +370,19 @@ async fn send_email(
             StatusCode::BAD_REQUEST
         })?;
 
+    // Generate unique Message-ID
+    let message_id = format!("<{}.{}@{}>",
+        uuid::Uuid::new_v4(),
+        chrono::Utc::now().timestamp(),
+        state.email_domain
+    );
+
     // Build email message
     let email = Message::builder()
         .from(from_mailbox.clone())
         .to(to_mailbox.clone())
         .subject(&body.subject)
+        .message_id(Some(message_id))
         .header(ContentType::TEXT_PLAIN)
         .body(body.body.clone())
         .map_err(|e| {
@@ -410,17 +421,17 @@ async fn send_email(
                     Some(from_mailbox.email.clone()),
                     vec![to_mailbox.email.clone()],
                 ) {
-                    Ok(envelope) => send_via_smtp_raw(&state.resolver, &mx_host, &envelope, &signed_bytes).await,
+                    Ok(envelope) => send_via_smtp_raw(&state.resolver, &mx_host, &state.email_domain, &envelope, &signed_bytes).await,
                     Err(e) => Err(format!("Failed to create envelope: {}", e)),
                 }
             }
             Err(e) => {
                 warn!("DKIM signing failed, sending unsigned: {}", e);
-                send_via_smtp(&state.resolver, &mx_host, &email).await
+                send_via_smtp(&state.resolver, &mx_host, &state.email_domain, &email).await
             }
         }
     } else {
-        send_via_smtp(&state.resolver, &mx_host, &email).await
+        send_via_smtp(&state.resolver, &mx_host, &state.email_domain, &email).await
     };
 
     match send_result {
@@ -484,6 +495,7 @@ async fn resolve_to_ipv4(resolver: &TokioAsyncResolver, hostname: &str) -> Resul
 async fn send_via_smtp(
     resolver: &TokioAsyncResolver,
     mx_host: &str,
+    email_domain: &str,
     email: &Message,
 ) -> Result<(), String> {
     // Resolve MX hostname to IPv4 address (bypass lettre's internal DNS which returns IPv6)
@@ -496,9 +508,13 @@ async fn send_via_smtp(
         .build()
         .map_err(|e| format!("TLS params error: {}", e))?;
 
+    // HELO name should be mail.domain (matches MX record)
+    let helo_name = format!("mail.{}", email_domain);
+
     // Connect to IP directly with STARTTLS
     let mailer = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(ip_addr.to_string())
         .port(25)
+        .hello_name(ClientId::Domain(helo_name.clone()))
         .tls(Tls::Required(tls_params.clone()))
         .timeout(Some(std::time::Duration::from_secs(30)))
         .build();
@@ -513,6 +529,7 @@ async fn send_via_smtp(
     // Fall back to opportunistic TLS (try TLS but allow plaintext)
     let mailer = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(ip_addr.to_string())
         .port(25)
+        .hello_name(ClientId::Domain(helo_name))
         .tls(Tls::Opportunistic(tls_params))
         .timeout(Some(std::time::Duration::from_secs(30)))
         .build();
@@ -529,6 +546,7 @@ async fn send_via_smtp(
 async fn send_via_smtp_raw(
     resolver: &TokioAsyncResolver,
     mx_host: &str,
+    email_domain: &str,
     envelope: &lettre::address::Envelope,
     raw_email: &[u8],
 ) -> Result<(), String> {
@@ -542,9 +560,13 @@ async fn send_via_smtp_raw(
         .build()
         .map_err(|e| format!("TLS params error: {}", e))?;
 
+    // HELO name should be mail.domain (matches MX record)
+    let helo_name = format!("mail.{}", email_domain);
+
     // Connect to IP directly with STARTTLS
     let mailer = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(ip_addr.to_string())
         .port(25)
+        .hello_name(ClientId::Domain(helo_name.clone()))
         .tls(Tls::Required(tls_params.clone()))
         .timeout(Some(std::time::Duration::from_secs(30)))
         .build();
@@ -559,6 +581,7 @@ async fn send_via_smtp_raw(
     // Fall back to opportunistic TLS
     let mailer = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(ip_addr.to_string())
         .port(25)
+        .hello_name(ClientId::Domain(helo_name))
         .tls(Tls::Opportunistic(tls_params))
         .timeout(Some(std::time::Duration::from_secs(30)))
         .build();
