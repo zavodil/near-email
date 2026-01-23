@@ -143,23 +143,32 @@ export default function EmailView({ email, onDelete, onReply }: EmailViewProps) 
 }
 
 function formatBody(body: string): string {
-  // Check if it's plain text (not HTML)
-  if (!body.includes('<')) {
-    // Split by "-------- Original Message --------" to style quoted content
-    const parts = body.split(/(-{4,}\s*Original Message\s*-{4,})/i);
+  // Check if it's actual HTML (contains HTML tags, not just angle brackets like email addresses)
+  const isHtml = /<(html|body|div|p|br|span|table|a\s|img\s|h[1-6]|ul|ol|li)[>\s/]/i.test(body);
 
-    if (parts.length > 1) {
-      // First part is the new message
-      const mainMessage = parts[0].replace(/\r\n/g, '<br>').replace(/\n/g, '<br>');
-      // Rest is quoted content (delimiter + quoted text)
-      const quotedParts = parts.slice(1).join('');
-      const quotedMessage = quotedParts.replace(/\r\n/g, '<br>').replace(/\n/g, '<br>');
-
-      return `${mainMessage}<div class="mt-4 pt-4 border-t border-gray-200 text-gray-500 text-sm">${quotedMessage}</div>`;
-    }
-
-    // No quote delimiter found, just convert newlines
-    return body.replace(/\r\n/g, '<br>').replace(/\n/g, '<br>');
+  if (isHtml) {
+    return body;
   }
-  return body;
+
+  // Plain text processing - escape HTML entities first
+  let escaped = body
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  // Split by "-------- Original Message --------" to style quoted content
+  const parts = escaped.split(/(-{4,}\s*Original Message\s*-{4,})/i);
+
+  if (parts.length > 1) {
+    // First part is the new message
+    const mainMessage = parts[0].replace(/\r\n/g, '<br>').replace(/\n/g, '<br>');
+    // Rest is quoted content (delimiter + quoted text)
+    const quotedParts = parts.slice(1).join('');
+    const quotedMessage = quotedParts.replace(/\r\n/g, '<br>').replace(/\n/g, '<br>');
+
+    return `${mainMessage}<div class="mt-4 pt-4 border-t border-gray-200 text-gray-400 text-xs italic">${quotedMessage}</div>`;
+  }
+
+  // No quote delimiter found, just convert newlines
+  return escaped.replace(/\r\n/g, '<br>').replace(/\n/g, '<br>');
 }

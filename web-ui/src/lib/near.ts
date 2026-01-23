@@ -9,6 +9,16 @@ import { PrivateKey, decrypt, encrypt } from 'eciesjs';
 
 // Configuration
 const NETWORK_ID = process.env.NEXT_PUBLIC_NETWORK_ID || 'mainnet';
+
+// Helper to convert Uint8Array to base64 without stack overflow
+// Note: String.fromCharCode(...largeArray) crashes with "Maximum call stack size exceeded" for arrays > ~100KB
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
 const OUTLAYER_CONTRACT = process.env.NEXT_PUBLIC_OUTLAYER_CONTRACT ||
   (NETWORK_ID === 'testnet' ? 'outlayer.testnet' : 'outlayer.near');
 const PROJECT_ID = process.env.NEXT_PUBLIC_PROJECT_ID || 'near-email';
@@ -276,8 +286,8 @@ export async function sendEmail(
   const encryptedBody = encrypt(pubkeyBytes, new TextEncoder().encode(body));
 
   // Convert to base64
-  const encryptedSubjectB64 = btoa(String.fromCharCode(...encryptedSubject));
-  const encryptedBodyB64 = btoa(String.fromCharCode(...encryptedBody));
+  const encryptedSubjectB64 = uint8ArrayToBase64(encryptedSubject);
+  const encryptedBodyB64 = uint8ArrayToBase64(encryptedBody);
 
   const params: Record<string, any> = {
     to,
@@ -290,7 +300,7 @@ export async function sendEmail(
   if (attachments && attachments.length > 0) {
     const attachmentsJson = JSON.stringify(attachments);
     const encryptedAttachments = encrypt(pubkeyBytes, new TextEncoder().encode(attachmentsJson));
-    params.encrypted_attachments = btoa(String.fromCharCode(...encryptedAttachments));
+    params.encrypted_attachments = uint8ArrayToBase64(encryptedAttachments);
   }
 
   if (maxOutputSize) params.max_output_size = maxOutputSize;
