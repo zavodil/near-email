@@ -321,9 +321,9 @@ export async function callOutLayer(action: string, params: Record<string, any>):
     },
     input_data: inputData,
     resource_limits: {
-      max_instructions: 100000000, // 100M instructions
-      max_memory_mb: 128,
-      max_execution_seconds: 60,
+      max_instructions: 500000000, // 500M - needed for large attachments
+      max_memory_mb: 256,          // 256MB - needed for ECIES encryption of attachments
+      max_execution_seconds: 120,  // 2 min for large data
     },
     response_format: 'Json',
   };
