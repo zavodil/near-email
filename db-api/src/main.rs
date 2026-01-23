@@ -4,7 +4,7 @@
 //! since WASI cannot make direct database connections.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     routing::{delete, get, post},
     Json, Router,
@@ -150,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/attachments/:id", get(get_attachment))
         .route("/health", get(health))
         .layer(cors)
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB for large attachments
         .with_state(Arc::new(state));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
