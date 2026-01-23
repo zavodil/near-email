@@ -9,13 +9,13 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@near-js/transactions": "^2.5.1",
     "@near-wallet-selector/core": "^10.1.0",
-    "@near-wallet-selector/modal-ui": "^10.1.0",
-    "@near-wallet-selector/my-near-wallet": "^10.1.0",
     "@near-wallet-selector/here-wallet": "^10.1.0",
     "@near-wallet-selector/meteor-wallet": "^10.1.0",
-    "@near-js/transactions": "^2.5.1",
-    "eciesjs": "^0.4.8",
+    "@near-wallet-selector/modal-ui": "^10.1.0",
+    "@near-wallet-selector/my-near-wallet": "^10.1.0",
+    "eciesjs": "^0.4.16",
     "near-api-js": "^6.5.1",
     "next": "14.0.4",
     "react": "^18.2.0",

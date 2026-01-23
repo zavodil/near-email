@@ -45,8 +45,13 @@ struct DkimConfig {
 struct AppState {
     db: PgPool,
     email_domain: String,
+    /// Account suffix to strip from account_id for email (e.g., ".testnet" or ".near")
+    account_suffix: String,
     resolver: TokioAsyncResolver,
     dkim: Option<DkimConfig>,
+    /// Email signature template (use {account} placeholder for sender's NEAR account)
+    /// Example: "Sent by {account} via NEAR OutLayer"
+    email_signature: Option<String>,
 }
 
 #[tokio::main]
@@ -107,9 +112,20 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    info!("Email domain: {}", email_domain);
+    // Account suffix to strip from account_id for email addresses
+    // .testnet for testnet, .near for mainnet (or empty string to keep full account_id)
+    let account_suffix = env::var("DEFAULT_ACCOUNT_SUFFIX").unwrap_or_else(|_| ".near".to_string());
 
-    let state = AppState { db, email_domain, resolver, dkim };
+    // Email signature template - use {account} for sender's NEAR account
+    // Example: "Sent by {account} via NEAR OutLayer"
+    let email_signature = env::var("EMAIL_SIGNATURE").ok().filter(|s| !s.is_empty());
+    if let Some(ref sig) = email_signature {
+        info!("Email signature enabled: {}", sig);
+    }
+
+    info!("Email domain: {}, account suffix: {}", email_domain, account_suffix);
+
+    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -344,8 +360,13 @@ async fn send_email(
         body.from_account, body.to, body.subject.len(), body.body.len()
     );
 
-    // Build from address
-    let from_email = format!("{}@{}", body.from_account, state.email_domain);
+    // Build from address - strip account suffix from account_id
+    // zavodil.testnet -> zavodil@near.email (on testnet)
+    // zavodil.near -> zavodil@near.email (on mainnet)
+    let from_local = body.from_account
+        .strip_suffix(&state.account_suffix)
+        .unwrap_or(&body.from_account);
+    let from_email = format!("{}@{}", from_local, state.email_domain);
     let from_mailbox: Mailbox = from_email
         .parse()
         .map_err(|e| {
@@ -377,6 +398,14 @@ async fn send_email(
         state.email_domain
     );
 
+    // Build email body with optional signature
+    let email_body = if let Some(ref sig_template) = state.email_signature {
+        let signature = sig_template.replace("{account}", &body.from_account);
+        format!("{}\n\n--\n{}", body.body, signature)
+    } else {
+        body.body.clone()
+    };
+
     // Build email message
     let email = Message::builder()
         .from(from_mailbox.clone())
@@ -384,7 +413,7 @@ async fn send_email(
         .subject(&body.subject)
         .message_id(Some(message_id))
         .header(ContentType::TEXT_PLAIN)
-        .body(body.body.clone())
+        .body(email_body)
         .map_err(|e| {
             error!("Failed to build email: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR

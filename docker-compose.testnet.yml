@@ -54,9 +54,13 @@ services:
       DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD:-testnet_password_123}@localhost:5432/near_email
       API_PORT: 8080
       EMAIL_DOMAIN: near.email
+      # TESTNET: strip .testnet suffix from account_id for email addresses
+      DEFAULT_ACCOUNT_SUFFIX: .testnet
       # DKIM signing for outgoing emails
       DKIM_PRIVATE_KEY: ${DKIM_PRIVATE_KEY}
       DKIM_SELECTOR: ${DKIM_SELECTOR:-mail}
+      # Email signature (use {account} for sender's NEAR account)
+      EMAIL_SIGNATURE: ${EMAIL_SIGNATURE:-Sent by {account} via NEAR OutLayer}
     # ports not needed with network_mode: host (8080 exposed directly)
     depends_on:
       postgres:

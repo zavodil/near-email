@@ -64,6 +64,9 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
     let default_account_suffix = std::env::var("DEFAULT_ACCOUNT_SUFFIX")
         .unwrap_or_else(|_| ".near".to_string());
 
+    // Email signature template (use {account} for sender's NEAR account)
+    let email_signature = std::env::var("EMAIL_SIGNATURE").ok();
+
     // Get authenticated signer from OutLayer (set by blockchain transaction)
     // This is the account that signed the transaction to outlayer contract
     let get_signer = || -> Result<String, Box<dyn std::error::Error>> {
@@ -148,6 +151,10 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             // Get authenticated signer
             let account_id = get_signer()?;
 
+            // Validate sender account - must end with expected suffix (.near/.testnet)
+            // This ensures replies can be delivered back to the sender
+            validate_sender_account(&account_id, &default_account_suffix)?;
+
             // Derive user's private key for decryption
             let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
 
@@ -171,10 +178,24 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 // Internal email - encrypt and store directly
                 let recipient_account = extract_account_from_email(&to, internal_suffix, &default_account_suffix);
 
+                // Strip suffix from account_id for email address (zavodil.testnet -> zavodil@near.email)
+                let sender_local = account_id
+                    .strip_suffix(&default_account_suffix)
+                    .unwrap_or(&account_id);
+                let sender_email = format!("{}@near.email", sender_local);
+
+                // Add signature if configured
+                let body_with_sig = if let Some(ref sig_template) = email_signature {
+                    let signature = sig_template.replace("{account}", &account_id);
+                    format!("{}\r\n\r\n--\r\n{}", body, signature)
+                } else {
+                    body.clone()
+                };
+
                 // Build email content (simple format)
                 let email_content = format!(
-                    "From: {}@near.email\r\nTo: {}\r\nSubject: {}\r\n\r\n{}",
-                    account_id, to, subject, body
+                    "From: {}\r\nTo: {}\r\nSubject: {}\r\n\r\n{}",
+                    sender_email, to, subject, body_with_sig
                 );
 
                 // Encrypt for recipient
@@ -185,7 +206,6 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 )?;
 
                 // Store in database
-                let sender_email = format!("{}@near.email", account_id);
                 let email_id = db::store_internal_email(
                     &get_db_api_url()?,
                     &recipient_account,
@@ -297,6 +317,30 @@ fn find_body_part(mail: &mailparse::ParsedMail) -> Option<String> {
 struct ParsedEmail {
     subject: String,
     body: String,
+}
+
+/// Validate that account_id is allowed to send emails
+/// - Must end with the expected suffix (.near for mainnet, .testnet for testnet)
+/// - Must NOT be an implicit account (64-char hex)
+/// Returns Ok(()) if valid, Err with message if invalid
+fn validate_sender_account(account_id: &str, expected_suffix: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Check for implicit accounts (64 hex characters)
+    if account_id.len() == 64 && account_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "Implicit accounts cannot send emails. Please use a named account ending with {}",
+            expected_suffix
+        ).into());
+    }
+
+    // Check that account ends with expected suffix
+    if !account_id.ends_with(expected_suffix) {
+        return Err(format!(
+            "Account '{}' cannot send emails. Only accounts ending with '{}' are supported. Replies will not be delivered to accounts from other zones.",
+            account_id, expected_suffix
+        ).into());
+    }
+
+    Ok(())
 }
 
 /// Extract NEAR account ID from email address

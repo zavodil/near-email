@@ -18,6 +18,10 @@ export default function Home({ accounts, loading }: HomeProps) {
   const [showCompose, setShowCompose] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasCheckedMail, setHasCheckedMail] = useState(false);
+  // Reply state
+  const [replyTo, setReplyTo] = useState('');
+  const [replySubject, setReplySubject] = useState('');
+  const [replyBody, setReplyBody] = useState('');
 
   const isConnected = accounts.length > 0;
   const accountId = isConnected ? accounts[0].accountId : null;
@@ -51,6 +55,21 @@ export default function Home({ accounts, loading }: HomeProps) {
     setSelectedEmail(null);
     setEmailCount(null);
     setHasCheckedMail(false);
+  }
+
+  function handleReply(to: string, subject: string, body: string) {
+    setReplyTo(to);
+    setReplySubject(subject);
+    setReplyBody(body);
+    setShowCompose(true);
+  }
+
+  function handleOpenCompose() {
+    // Reset reply state for new compose
+    setReplyTo('');
+    setReplySubject('');
+    setReplyBody('');
+    setShowCompose(true);
   }
 
   if (loading) {
@@ -147,7 +166,7 @@ export default function Home({ accounts, loading }: HomeProps) {
         </div>
         <div className="flex items-center gap-4">
           <button
-            onClick={() => setShowCompose(true)}
+            onClick={handleOpenCompose}
             className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
           >
             Compose
@@ -202,10 +221,10 @@ export default function Home({ accounts, loading }: HomeProps) {
             <EmailView
               email={selectedEmail}
               onDelete={async () => {
-                // Handle delete
                 setSelectedEmail(null);
                 await loadEmails();
               }}
+              onReply={handleReply}
             />
           ) : (
             <div className="flex items-center justify-center h-full text-gray-500">
@@ -222,8 +241,10 @@ export default function Home({ accounts, loading }: HomeProps) {
           onClose={() => setShowCompose(false)}
           onSent={() => {
             setShowCompose(false);
-            // Optionally refresh sent items
           }}
+          initialTo={replyTo}
+          initialSubject={replySubject}
+          initialBody={replyBody}
         />
       )}
     </div>

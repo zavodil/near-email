@@ -5,9 +5,10 @@ import { deleteEmail } from '@/lib/near';
 interface EmailViewProps {
   email: Email;
   onDelete: () => void;
+  onReply: (to: string, subject: string, quotedBody: string) => void;
 }
 
-export default function EmailView({ email, onDelete }: EmailViewProps) {
+export default function EmailView({ email, onDelete, onReply }: EmailViewProps) {
   const [deleting, setDeleting] = useState(false);
 
   async function handleDelete() {
@@ -25,6 +26,19 @@ export default function EmailView({ email, onDelete }: EmailViewProps) {
     }
   }
 
+  function handleReply() {
+    const replyTo = email.from;
+    const replySubject = email.subject.startsWith('Re: ')
+      ? email.subject
+      : `Re: ${email.subject}`;
+
+    // Quote original message
+    const date = new Date(email.received_at).toLocaleString();
+    const quotedBody = `\n\n-------- Original Message --------\nFrom: ${email.from}\nDate: ${date}\nSubject: ${email.subject}\n\n${email.body}`;
+
+    onReply(replyTo, replySubject, quotedBody);
+  }
+
   return (
     <div className="p-6">
       {/* Header */}
@@ -33,13 +47,21 @@ export default function EmailView({ email, onDelete }: EmailViewProps) {
           <h2 className="text-2xl font-semibold text-gray-900">
             {email.subject || '(no subject)'}
           </h2>
-          <button
-            onClick={handleDelete}
-            disabled={deleting}
-            className="text-red-600 hover:text-red-700 transition-colors"
-          >
-            {deleting ? 'Deleting...' : 'Delete'}
-          </button>
+          <div className="flex gap-3">
+            <button
+              onClick={handleReply}
+              className="text-blue-600 hover:text-blue-700 transition-colors"
+            >
+              Reply
+            </button>
+            <button
+              onClick={handleDelete}
+              disabled={deleting}
+              className="text-red-600 hover:text-red-700 transition-colors"
+            >
+              {deleting ? 'Deleting...' : 'Delete'}
+            </button>
+          </div>
         </div>
 
         <div className="flex items-center text-gray-600 mb-2">

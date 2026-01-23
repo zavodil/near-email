@@ -5,12 +5,23 @@ interface ComposeModalProps {
   fromAddress: string;
   onClose: () => void;
   onSent: () => void;
+  // Optional initial values for reply
+  initialTo?: string;
+  initialSubject?: string;
+  initialBody?: string;
 }
 
-export default function ComposeModal({ fromAddress, onClose, onSent }: ComposeModalProps) {
-  const [to, setTo] = useState('');
-  const [subject, setSubject] = useState('');
-  const [body, setBody] = useState('');
+export default function ComposeModal({
+  fromAddress,
+  onClose,
+  onSent,
+  initialTo = '',
+  initialSubject = '',
+  initialBody = '',
+}: ComposeModalProps) {
+  const [to, setTo] = useState(initialTo);
+  const [subject, setSubject] = useState(initialSubject);
+  const [body, setBody] = useState(initialBody);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
