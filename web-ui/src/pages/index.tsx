@@ -183,7 +183,7 @@ export default function Home({ accounts, loading }: HomeProps) {
     setHasCheckedMail(false);
   }
 
-  function handleSavePaymentKey() {
+  async function handleSavePaymentKey() {
     setPaymentKeyError(null);
     const success = setPaymentKey(paymentKeyInput.trim());
     if (success) {
@@ -193,10 +193,19 @@ export default function Home({ accounts, loading }: HomeProps) {
       setPaymentKeyHasKey(config.hasKey);
       setShowPaymentKeyInput(false);
       setPaymentKeyInput('');
-      // Clear cached emails since user identity changed
+      // Auto-reload emails with new identity
       setEmails([]);
       setSentEmails([]);
-      setHasCheckedMail(false);
+      setHasCheckedMail(true); // Skip "Check Mail" screen
+      setLoadingEmails(true);
+      try {
+        const result = await getEmails(0, 0);
+        updateFromResult(result);
+      } catch (err: any) {
+        setError(err.message);
+      } finally {
+        setLoadingEmails(false);
+      }
     } else {
       setPaymentKeyError('Invalid format. Expected: owner:nonce:key');
     }
@@ -646,7 +655,7 @@ export default function Home({ accounts, loading }: HomeProps) {
       {/* Payment Key input modal */}
       {showPaymentKeyInput && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl shadow-xl p-4 w-full max-w-md mx-4">
+          <div className="bg-white rounded-xl shadow-xl p-4 w-full max-w-xl mx-4">
             <h3 className="text-lg font-semibold text-gray-900 mb-2">
               Configure Payment Key
             </h3>
@@ -654,7 +663,7 @@ export default function Home({ accounts, loading }: HomeProps) {
               Enter your Payment Key to use HTTPS API instead of blockchain transactions.
               Create keys at{' '}
               <a
-                href="https://outlayer.xyz/dashboard"
+                href="https://outlayer.fastnear.com"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-blue-600 hover:underline"
@@ -670,11 +679,11 @@ export default function Home({ accounts, loading }: HomeProps) {
             )}
 
             <input
-              type="password"
+              type="text"
               value={paymentKeyInput}
               onChange={(e) => setPaymentKeyInput(e.target.value)}
               placeholder="alice.near:0:abcd1234..."
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
               onKeyDown={(e) => e.key === 'Enter' && handleSavePaymentKey()}
             />
             <p className="text-xs text-gray-400 mt-1">
