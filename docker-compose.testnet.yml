@@ -59,8 +59,8 @@ services:
       # DKIM signing for outgoing emails
       DKIM_PRIVATE_KEY: ${DKIM_PRIVATE_KEY}
       DKIM_SELECTOR: ${DKIM_SELECTOR:-mail}
-      # Email signature (use {account} for sender's NEAR account)
-      EMAIL_SIGNATURE: ${EMAIL_SIGNATURE:-Sent by {account} via NEAR OutLayer}
+      # Email signature (use %account% for sender's NEAR account)
+      EMAIL_SIGNATURE: ${EMAIL_SIGNATURE:-Sent by %account% via NEAR OutLayer}
     # ports not needed with network_mode: host (8080 exposed directly)
     depends_on:
       postgres:

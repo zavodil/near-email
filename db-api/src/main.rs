@@ -49,8 +49,8 @@ struct AppState {
     account_suffix: String,
     resolver: TokioAsyncResolver,
     dkim: Option<DkimConfig>,
-    /// Email signature template (use {account} placeholder for sender's NEAR account)
-    /// Example: "Sent by {account} via NEAR OutLayer"
+    /// Email signature template (use %account% placeholder for sender's NEAR account)
+    /// Example: "Sent by %account% via NEAR OutLayer"
     email_signature: Option<String>,
 }
 
@@ -116,8 +116,8 @@ async fn main() -> anyhow::Result<()> {
     // .testnet for testnet, .near for mainnet (or empty string to keep full account_id)
     let account_suffix = env::var("DEFAULT_ACCOUNT_SUFFIX").unwrap_or_else(|_| ".near".to_string());
 
-    // Email signature template - use {account} for sender's NEAR account
-    // Example: "Sent by {account} via NEAR OutLayer"
+    // Email signature template - use %account% for sender's NEAR account
+    // Example: "Sent by %account% via NEAR OutLayer"
     let email_signature = env::var("EMAIL_SIGNATURE").ok().filter(|s| !s.is_empty());
     if let Some(ref sig) = email_signature {
         info!("Email signature enabled: {}", sig);
@@ -400,7 +400,7 @@ async fn send_email(
 
     // Build email body with optional signature
     let email_body = if let Some(ref sig_template) = state.email_signature {
-        let signature = sig_template.replace("{account}", &body.from_account);
+        let signature = sig_template.replace("%account%", &body.from_account);
         format!("{}\n\n--\n{}", body.body, signature)
     } else {
         body.body.clone()

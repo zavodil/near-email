@@ -64,7 +64,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
     let default_account_suffix = std::env::var("DEFAULT_ACCOUNT_SUFFIX")
         .unwrap_or_else(|_| ".near".to_string());
 
-    // Email signature template (use {account} for sender's NEAR account)
+    // Email signature template (use %account% for sender's NEAR account)
     let email_signature = std::env::var("EMAIL_SIGNATURE").ok();
 
     // Get authenticated signer from OutLayer (set by blockchain transaction)
@@ -186,7 +186,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
 
                 // Add signature if configured
                 let body_with_sig = if let Some(ref sig_template) = email_signature {
-                    let signature = sig_template.replace("{account}", &account_id);
+                    let signature = sig_template.replace("%account%", &account_id);
                     format!("{}\r\n\r\n--\r\n{}", body, signature)
                 } else {
                     body.clone()
