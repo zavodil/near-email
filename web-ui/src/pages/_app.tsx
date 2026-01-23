@@ -2,7 +2,7 @@ import '@/styles/globals.css';
 import '@near-wallet-selector/modal-ui/styles.css';
 import type { AppProps } from 'next/app';
 import { useEffect, useState } from 'react';
-import { initWalletSelector, getAccounts } from '@/lib/near';
+import { initWalletSelector, getAccounts, initPaymentKey } from '@/lib/near';
 import type { AccountState } from '@near-wallet-selector/core';
 
 export default function App({ Component, pageProps }: AppProps) {
@@ -12,6 +12,9 @@ export default function App({ Component, pageProps }: AppProps) {
   useEffect(() => {
     async function init() {
       try {
+        // Initialize payment key from localStorage
+        initPaymentKey();
+
         const selector = await initWalletSelector();
 
         // Subscribe to state changes

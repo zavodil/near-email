@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Email, Attachment } from '@/lib/near';
-import { deleteEmail } from '@/lib/near';
+import { deleteEmail, getAttachment } from '@/lib/near';
 
 interface EmailViewProps {
   email: Email;
@@ -10,6 +10,7 @@ interface EmailViewProps {
 
 export default function EmailView({ email, onDelete, onReply }: EmailViewProps) {
   const [deleting, setDeleting] = useState(false);
+  const [loadingAttachments, setLoadingAttachments] = useState<Set<string>>(new Set());
 
   async function handleDelete() {
     if (!confirm('Delete this email?')) return;
@@ -39,7 +40,10 @@ export default function EmailView({ email, onDelete, onReply }: EmailViewProps) 
     onReply(replyTo, replySubject, quotedBody);
   }
 
-  function downloadAttachment(att: Attachment) {
+  // Download attachment with inline data
+  function downloadInlineAttachment(att: Attachment) {
+    if (!att.data) return;
+
     // Decode base64 to binary
     const binary = atob(att.data);
     const bytes = new Uint8Array(binary.length);
@@ -56,6 +60,60 @@ export default function EmailView({ email, onDelete, onReply }: EmailViewProps) 
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+  // Download lazy-loaded attachment
+  async function downloadLazyAttachment(att: Attachment) {
+    if (!att.attachment_id) return;
+
+    // Mark as loading
+    setLoadingAttachments(prev => new Set(prev).add(att.attachment_id!));
+
+    try {
+      const result = await getAttachment(att.attachment_id);
+
+      // Decode and download
+      const binary = atob(result.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: result.content_type });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = result.filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to download attachment:', err);
+      alert('Failed to download attachment');
+    } finally {
+      setLoadingAttachments(prev => {
+        const next = new Set(prev);
+        next.delete(att.attachment_id!);
+        return next;
+      });
+    }
+  }
+
+  // Handle attachment click
+  function handleAttachmentClick(att: Attachment) {
+    if (att.data) {
+      // Inline attachment - download immediately
+      downloadInlineAttachment(att);
+    } else if (att.attachment_id) {
+      // Lazy-loaded attachment - fetch then download
+      downloadLazyAttachment(att);
+    }
+  }
+
+  // Check if attachment is currently loading
+  function isAttachmentLoading(att: Attachment): boolean {
+    return att.attachment_id ? loadingAttachments.has(att.attachment_id) : false;
   }
 
   function formatSize(bytes: number): string {
@@ -114,19 +172,39 @@ export default function EmailView({ email, onDelete, onReply }: EmailViewProps) 
             {attachments.length} {attachments.length === 1 ? 'attachment' : 'attachments'}
           </h3>
           <div className="flex flex-wrap gap-1.5">
-            {attachments.map((att, idx) => (
-              <button
-                key={idx}
-                onClick={() => downloadAttachment(att)}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-50 hover:bg-gray-100 rounded-md transition-colors text-xs border border-gray-200"
-              >
-                <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                </svg>
-                <span className="text-gray-700 max-w-[150px] truncate">{att.filename}</span>
-                <span className="text-gray-400">({formatSize(att.size)})</span>
-              </button>
-            ))}
+            {attachments.map((att, idx) => {
+              const isLoading = isAttachmentLoading(att);
+              const isLazy = !att.data && att.attachment_id;
+
+              return (
+                <button
+                  key={idx}
+                  onClick={() => handleAttachmentClick(att)}
+                  disabled={isLoading}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md transition-colors text-xs border ${
+                    isLoading
+                      ? 'bg-gray-100 border-gray-300 cursor-wait'
+                      : 'bg-gray-50 hover:bg-gray-100 border-gray-200'
+                  }`}
+                >
+                  {isLoading ? (
+                    <svg className="w-3.5 h-3.5 text-gray-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                  )}
+                  <span className="text-gray-700 max-w-[150px] truncate">{att.filename}</span>
+                  <span className="text-gray-400">({formatSize(att.size)})</span>
+                  {isLazy && !isLoading && (
+                    <span className="text-blue-500 text-[10px]">fetch</span>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}

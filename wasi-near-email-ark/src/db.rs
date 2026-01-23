@@ -256,3 +256,73 @@ pub fn count_sent_emails(
 
     Ok(result.count)
 }
+
+/// Store an attachment for lazy loading
+pub fn store_attachment(
+    api_url: &str,
+    email_id: &str,
+    folder: &str,
+    recipient: &str,
+    filename: &str,
+    content_type: &str,
+    size: usize,
+    encrypted_data: &[u8],
+) -> Result<String, Box<dyn std::error::Error>> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let url = format!("{}/attachments", api_url);
+
+    let payload = serde_json::json!({
+        "email_id": email_id,
+        "folder": folder,
+        "recipient": recipient,
+        "filename": filename,
+        "content_type": content_type,
+        "size": size,
+        "encrypted_data": STANDARD.encode(encrypted_data),
+    });
+
+    let body_data = serde_json::to_vec(&payload)?;
+    let response = Client::new()
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(&body_data)
+        .connect_timeout(TIMEOUT)
+        .send()?;
+
+    if response.status() != 200 {
+        return Err(format!("Store attachment failed: {}", response.status()).into());
+    }
+
+    let body = response.body()?;
+    let result: crate::types::DbStoreAttachmentResponse = serde_json::from_slice(&body)?;
+
+    Ok(result.id)
+}
+
+/// Fetch an attachment by ID
+pub fn fetch_attachment(
+    api_url: &str,
+    attachment_id: &str,
+    recipient: &str,
+) -> Result<crate::types::DbAttachmentResponse, Box<dyn std::error::Error>> {
+    let url = format!("{}/attachments/{}?recipient={}", api_url, attachment_id, recipient);
+
+    let response = Client::new()
+        .get(&url)
+        .connect_timeout(TIMEOUT)
+        .send()?;
+
+    if response.status() == 404 {
+        return Err("Attachment not found".into());
+    }
+
+    if response.status() != 200 {
+        return Err(format!("Fetch attachment failed: {}", response.status()).into());
+    }
+
+    let body = response.body()?;
+    let result: crate::types::DbAttachmentResponse = serde_json::from_slice(&body)?;
+
+    Ok(result)
+}

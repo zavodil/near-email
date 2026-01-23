@@ -38,10 +38,9 @@ fn main() {
 }
 
 fn process() -> Result<Response, Box<dyn std::error::Error>> {
-    // Read raw input for debugging
+    // Read raw input
     let raw_input = env::input();
     let raw_str = String::from_utf8_lossy(&raw_input);
-    eprintln!("DEBUG raw input: {}", raw_str);
 
     // Parse input
     let input: Request = serde_json::from_slice(&raw_input)
@@ -94,6 +93,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 &get_db_api_url()?,
                 &account_id,
                 &user_privkey,
+                &master_privkey,
                 max_size,
                 inbox_offset.unwrap_or(0),
                 sent_offset.unwrap_or(0),
@@ -117,10 +117,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
         }
 
         Request::SendEmail {
-            to,
-            encrypted_subject,
-            encrypted_body,
-            encrypted_attachments,
+            encrypted_data,
             ephemeral_pubkey,
             max_output_size,
         } => {
@@ -137,32 +134,20 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             // Derive user's private key for decryption
             let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
 
-            // Decrypt subject and body
-            let subject_ciphertext = STANDARD.decode(&encrypted_subject)
-                .map_err(|e| format!("Invalid encrypted_subject base64: {}", e))?;
-            let body_ciphertext = STANDARD.decode(&encrypted_body)
-                .map_err(|e| format!("Invalid encrypted_body base64: {}", e))?;
+            // Decrypt the combined payload (to, subject, body, attachments)
+            let ciphertext = STANDARD.decode(&encrypted_data)
+                .map_err(|e| format!("Invalid encrypted_data base64: {}", e))?;
+            let decrypted_bytes = crypto::decrypt_email(&user_privkey, &ciphertext)?;
+            let decrypted_json = String::from_utf8(decrypted_bytes)
+                .map_err(|e| format!("Invalid UTF-8 in encrypted_data: {}", e))?;
 
-            let subject_bytes = crypto::decrypt_email(&user_privkey, &subject_ciphertext)?;
-            let body_bytes = crypto::decrypt_email(&user_privkey, &body_ciphertext)?;
+            let payload: SendEmailPayload = serde_json::from_str(&decrypted_json)
+                .map_err(|e| format!("Invalid SendEmailPayload JSON: {}", e))?;
 
-            let subject = String::from_utf8(subject_bytes)
-                .map_err(|e| format!("Invalid UTF-8 in subject: {}", e))?;
-            let body = String::from_utf8(body_bytes)
-                .map_err(|e| format!("Invalid UTF-8 in body: {}", e))?;
-
-            // Decrypt attachments if present
-            let attachments: Vec<Attachment> = if let Some(enc_att) = encrypted_attachments {
-                let att_ciphertext = STANDARD.decode(&enc_att)
-                    .map_err(|e| format!("Invalid encrypted_attachments base64: {}", e))?;
-                let att_bytes = crypto::decrypt_email(&user_privkey, &att_ciphertext)?;
-                let att_json = String::from_utf8(att_bytes)
-                    .map_err(|e| format!("Invalid UTF-8 in attachments: {}", e))?;
-                serde_json::from_str(&att_json)
-                    .map_err(|e| format!("Invalid attachments JSON: {}", e))?
-            } else {
-                Vec::new()
-            };
+            let to = payload.to;
+            let subject = payload.subject;
+            let body = payload.body;
+            let attachments = payload.attachments;
 
             // Check if internal email (@near.email)
             let internal_suffix = "@near.email";
@@ -253,6 +238,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 &get_db_api_url()?,
                 &account_id,
                 &user_privkey,
+                &master_privkey,
                 max_size,
                 0, // Fresh from start
                 0,
@@ -292,6 +278,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 &get_db_api_url()?,
                 &account_id,
                 &user_privkey,
+                &master_privkey,
                 max_size,
                 0,
                 0,
@@ -329,15 +316,53 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 public_key: pubkey_hex,
             }))
         }
+
+        Request::GetAttachment {
+            attachment_id,
+            ephemeral_pubkey,
+        } => {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+
+            let account_id = get_signer()?;
+            let ephemeral_pubkey_bytes = hex::decode(&ephemeral_pubkey)
+                .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?;
+
+            // Derive user's private key for decryption
+            let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
+
+            // Fetch encrypted attachment from database
+            let attachment = db::fetch_attachment(
+                &get_db_api_url()?,
+                &attachment_id,
+                &account_id,
+            )?;
+
+            // Decrypt attachment data
+            let decrypted = crypto::decrypt_email(&user_privkey, &attachment.encrypted_data)?;
+
+            // Re-encrypt with ephemeral key for response
+            let encrypted = ecies::encrypt(&ephemeral_pubkey_bytes, &decrypted)
+                .map_err(|e| format!("Failed to encrypt attachment: {}", e))?;
+
+            Ok(Response::GetAttachment(GetAttachmentResponse {
+                success: true,
+                encrypted_data: STANDARD.encode(&encrypted),
+                filename: attachment.filename,
+                content_type: attachment.content_type,
+                size: attachment.size as usize,
+            }))
+        }
     }
 }
 
 /// Fetch combined inbox + sent emails with size limit
 /// Returns (EmailData, inbox_next_offset, sent_next_offset)
+/// Large attachments (>= 2KB) are stored separately for lazy loading
 fn fetch_combined_emails(
     api_url: &str,
     account_id: &str,
     user_privkey: &libsecp256k1::SecretKey,
+    master_privkey: &libsecp256k1::SecretKey,
     max_size: usize,
     inbox_offset: i64,
     sent_offset: i64,
@@ -356,9 +381,26 @@ fn fetch_combined_emails(
             Ok(decrypted) => {
                 let parsed = parse_email(&decrypted)?;
 
-                // Calculate full email size with attachments
-                let attachments_size: usize = parsed.attachments.iter()
-                    .map(|a| a.filename.len() + a.content_type.len() + a.data.len() + 50)
+                // Process attachments with lazy loading for large ones
+                let attachments = process_attachments(
+                    parsed.raw_attachments,
+                    api_url,
+                    &enc_email.id,
+                    "inbox",
+                    account_id,
+                    master_privkey,
+                );
+
+                // Calculate email size (lazy attachments only add metadata size)
+                let attachments_size: usize = attachments.iter()
+                    .map(|a| {
+                        let base = a.filename.len() + a.content_type.len() + 50;
+                        if let Some(ref data) = a.data {
+                            base + data.len()
+                        } else {
+                            base + 50  // Just metadata for lazy attachments
+                        }
+                    })
                     .sum();
 
                 let full_email_size = enc_email.id.len() + enc_email.sender_email.len() +
@@ -377,13 +419,13 @@ fn fetch_combined_emails(
                         subject: parsed.subject,
                         body: parsed.body,
                         received_at: enc_email.received_at,
-                        attachments: parsed.attachments,
+                        attachments,
                     };
                     current_size += full_email_size;
                     inbox_emails.push(email);
                 } else if current_size + truncated_size <= effective_max {
                     // Email too large, show truncated version
-                    let att_count = parsed.attachments.len();
+                    let att_count = attachments.len();
                     let att_info = if att_count > 0 {
                         format!("\n\n[{} attachment(s) not shown]", att_count)
                     } else {
@@ -428,8 +470,26 @@ fn fetch_combined_emails(
             Ok(decrypted) => {
                 let parsed = parse_email(&decrypted)?;
 
-                let attachments_size: usize = parsed.attachments.iter()
-                    .map(|a| a.filename.len() + a.content_type.len() + a.data.len() + 50)
+                // Process attachments with lazy loading for large ones
+                let attachments = process_attachments(
+                    parsed.raw_attachments,
+                    api_url,
+                    &enc_email.id,
+                    "sent",
+                    account_id,
+                    master_privkey,
+                );
+
+                // Calculate email size (lazy attachments only add metadata size)
+                let attachments_size: usize = attachments.iter()
+                    .map(|a| {
+                        let base = a.filename.len() + a.content_type.len() + 50;
+                        if let Some(ref data) = a.data {
+                            base + data.len()
+                        } else {
+                            base + 50  // Just metadata for lazy attachments
+                        }
+                    })
                     .sum();
 
                 let full_email_size = enc_email.id.len() + enc_email.recipient_email.len() +
@@ -448,13 +508,13 @@ fn fetch_combined_emails(
                         body: parsed.body,
                         tx_hash: enc_email.tx_hash,
                         sent_at: enc_email.sent_at,
-                        attachments: parsed.attachments,
+                        attachments,
                     };
                     current_size += full_email_size;
                     sent_emails.push(email);
                 } else if current_size + truncated_size <= effective_max {
                     // Email too large, show truncated version
-                    let att_count = parsed.attachments.len();
+                    let att_count = attachments.len();
                     let att_info = if att_count > 0 {
                         format!("\n\n[{} attachment(s) not shown]", att_count)
                     } else {
@@ -499,10 +559,8 @@ fn fetch_combined_emails(
     ))
 }
 
-/// Parse decrypted email content including attachments
+/// Parse decrypted email content including raw attachments
 fn parse_email(data: &[u8]) -> Result<ParsedEmail, Box<dyn std::error::Error>> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-
     let parsed = mailparse::parse_mail(data)?;
 
     let subject = parsed
@@ -518,11 +576,11 @@ fn parse_email(data: &[u8]) -> Result<ParsedEmail, Box<dyn std::error::Error>> {
         find_body_part(&parsed).unwrap_or_default()
     };
 
-    // Extract attachments
-    let mut attachments = Vec::new();
-    extract_attachments(&parsed, &mut attachments);
+    // Extract raw attachments (will be processed for lazy loading later)
+    let mut raw_attachments = Vec::new();
+    extract_attachments_raw(&parsed, &mut raw_attachments);
 
-    Ok(ParsedEmail { subject, body, attachments })
+    Ok(ParsedEmail { subject, body, raw_attachments })
 }
 
 /// Recursively find text body in email parts
@@ -545,10 +603,16 @@ fn find_body_part(mail: &mailparse::ParsedMail) -> Option<String> {
     None
 }
 
-/// Recursively extract attachments from email parts
-fn extract_attachments(mail: &mailparse::ParsedMail, attachments: &mut Vec<types::Attachment>) {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+/// Raw attachment data before lazy loading processing
+struct RawAttachment {
+    filename: String,
+    content_type: String,
+    data: Vec<u8>,
+    size: usize,
+}
 
+/// Recursively extract raw attachments from email parts
+fn extract_attachments_raw(mail: &mailparse::ParsedMail, attachments: &mut Vec<RawAttachment>) {
     // Check Content-Disposition header for attachment
     let disposition = mail.headers
         .iter()
@@ -587,13 +651,12 @@ fn extract_attachments(mail: &mailparse::ParsedMail, attachments: &mut Vec<types
     if should_include {
         if let Ok(body_bytes) = mail.get_body_raw() {
             let size = body_bytes.len();
-            let data = STANDARD.encode(&body_bytes);
             let fname = filename.unwrap_or_else(|| "attachment".to_string());
 
-            attachments.push(types::Attachment {
+            attachments.push(RawAttachment {
                 filename: fname,
                 content_type: content_type.clone(),
-                data,
+                data: body_bytes,
                 size,
             });
         }
@@ -601,14 +664,93 @@ fn extract_attachments(mail: &mailparse::ParsedMail, attachments: &mut Vec<types
 
     // Recurse into subparts
     for part in &mail.subparts {
-        extract_attachments(part, attachments);
+        extract_attachments_raw(part, attachments);
     }
+}
+
+/// Process raw attachments: small ones are inlined, large ones are stored for lazy loading
+fn process_attachments(
+    raw_attachments: Vec<RawAttachment>,
+    api_url: &str,
+    email_id: &str,
+    folder: &str,
+    recipient: &str,
+    master_privkey: &libsecp256k1::SecretKey,
+) -> Vec<types::Attachment> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use types::ATTACHMENT_LAZY_THRESHOLD;
+
+    let mut result = Vec::new();
+
+    for raw in raw_attachments {
+        if raw.size < ATTACHMENT_LAZY_THRESHOLD {
+            // Small attachment - include inline
+            result.push(types::Attachment {
+                filename: raw.filename,
+                content_type: raw.content_type,
+                data: Some(STANDARD.encode(&raw.data)),
+                size: raw.size,
+                attachment_id: None,
+            });
+        } else {
+            // Large attachment - store for lazy loading
+            // Encrypt attachment data with recipient's key
+            match crypto::encrypt_for_account(master_privkey, recipient, &raw.data) {
+                Ok(encrypted) => {
+                    match db::store_attachment(
+                        api_url,
+                        email_id,
+                        folder,
+                        recipient,
+                        &raw.filename,
+                        &raw.content_type,
+                        raw.size,
+                        &encrypted,
+                    ) {
+                        Ok(attachment_id) => {
+                            result.push(types::Attachment {
+                                filename: raw.filename,
+                                content_type: raw.content_type,
+                                data: None,
+                                size: raw.size,
+                                attachment_id: Some(attachment_id),
+                            });
+                        }
+                        Err(e) => {
+                            // Failed to store - include inline as fallback
+                            eprintln!("Failed to store attachment for lazy loading: {}", e);
+                            result.push(types::Attachment {
+                                filename: raw.filename,
+                                content_type: raw.content_type,
+                                data: Some(STANDARD.encode(&raw.data)),
+                                size: raw.size,
+                                attachment_id: None,
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Failed to encrypt - include inline as fallback
+                    eprintln!("Failed to encrypt attachment: {}", e);
+                    result.push(types::Attachment {
+                        filename: raw.filename,
+                        content_type: raw.content_type,
+                        data: Some(STANDARD.encode(&raw.data)),
+                        size: raw.size,
+                        attachment_id: None,
+                    });
+                }
+            }
+        }
+    }
+
+    result
 }
 
 struct ParsedEmail {
     subject: String,
     body: String,
-    attachments: Vec<types::Attachment>,
+    raw_attachments: Vec<RawAttachment>,
 }
 
 /// Validate that account_id is allowed to send emails
@@ -683,13 +825,19 @@ fn build_email_content(
 
         // Attachment parts
         for att in attachments {
+            // For sending, attachments must have inline data
+            let data = match &att.data {
+                Some(d) => d,
+                None => continue,  // Skip attachments without data (shouldn't happen for sending)
+            };
+
             result.push_str(&format!("--{}\r\n", boundary));
             result.push_str(&format!("Content-Type: {}; name=\"{}\"\r\n", att.content_type, att.filename));
             result.push_str("Content-Transfer-Encoding: base64\r\n");
             result.push_str(&format!("Content-Disposition: attachment; filename=\"{}\"\r\n", att.filename));
             result.push_str("\r\n");
             // Split base64 into 76-char lines
-            for chunk in att.data.as_bytes().chunks(76) {
+            for chunk in data.as_bytes().chunks(76) {
                 result.push_str(std::str::from_utf8(chunk).unwrap_or(""));
                 result.push_str("\r\n");
             }

@@ -126,6 +126,54 @@ npm install
 npm run dev
 ```
 
+## Payment Key Mode (HTTPS API)
+
+The web UI supports two modes of operation:
+
+### Transaction Mode (Default)
+- Each operation sends a NEAR blockchain transaction
+- Authenticated via wallet signature
+- ~0.1 NEAR deposit per operation
+- Limited to ~1.5 MB response size
+
+### Payment Key Mode
+- Operations via HTTPS API (no blockchain transactions)
+- Authenticated via Payment Key
+- Costs deducted from prepaid USDC/USDT balance
+- **25 MB response size** (larger attachments)
+- **Faster** (no transaction confirmation wait)
+
+### How to Use Payment Key Mode
+
+1. **Get a Payment Key** from [OutLayer Dashboard](https://outlayer.xyz/dashboard):
+   - Create a new Payment Key
+   - Top up balance with USDC/USDT
+   - Copy the key (format: `owner:nonce:secret`)
+
+2. **Configure in web UI**:
+   - Click on your account dropdown
+   - Click "Configure" under Payment Key section
+   - Paste your key
+   - Toggle "Payment Key" switch ON
+
+3. **Switch between modes**:
+   - Toggle ON: Uses HTTPS API (Payment Key balance)
+   - Toggle OFF: Uses blockchain transactions (NEAR wallet)
+
+### Resource Limits by Mode
+
+| Parameter | Transaction | Payment Key |
+|-----------|-------------|-------------|
+| max_output_size | 1.5 MB | 25 MB |
+| max_memory_mb | 128 | 256 |
+| max_instructions | 100M | 500M |
+| max_execution_seconds | 60 | 120 |
+
+### Storage
+- Payment Key stored in browser `localStorage`
+- Key and toggle state stored separately
+- Never sent to any server except OutLayer API
+
 ## Environment Variables
 
 ### smtp-server
@@ -142,6 +190,16 @@ npm run dev
 |----------|-------------|
 | `PROTECTED_MASTER_KEY` | Hex-encoded secp256k1 private key |
 | `DATABASE_API_URL` | HTTP API URL for database access |
+
+### web-ui
+
+| Variable | Description |
+|----------|-------------|
+| `NEXT_PUBLIC_NETWORK_ID` | NEAR network: `mainnet` or `testnet` |
+| `NEXT_PUBLIC_OUTLAYER_API_URL` | OutLayer API URL for HTTPS mode |
+| `NEXT_PUBLIC_PROJECT_ID` | OutLayer project ID (e.g., `zavodil2.testnet/near-email`) |
+| `NEXT_PUBLIC_SECRETS_PROFILE` | Secrets profile name (default: `default`) |
+| `NEXT_PUBLIC_SECRETS_ACCOUNT_ID` | Account that stores secrets |
 
 ## DNS Configuration
 

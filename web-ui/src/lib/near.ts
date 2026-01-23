@@ -9,6 +9,17 @@ import { PrivateKey, decrypt, encrypt } from 'eciesjs';
 
 // Configuration
 const NETWORK_ID = process.env.NEXT_PUBLIC_NETWORK_ID || 'mainnet';
+const OUTLAYER_API_URL = process.env.NEXT_PUBLIC_OUTLAYER_API_URL || 'https://outlayer.xyz';
+
+// Payment Key localStorage keys
+const PAYMENT_KEY_STORAGE = 'near-email-payment-key';
+const PAYMENT_KEY_ENABLED_STORAGE = 'near-email-payment-key-enabled';
+
+// Max output size limits (in bytes)
+// Transaction mode limited by blockchain (~1.5MB safe)
+// HTTPS mode can handle much more (25MB reasonable for browser/memory)
+const MAX_OUTPUT_SIZE_TRANSACTION = 1_500_000;  // 1.5 MB
+const MAX_OUTPUT_SIZE_HTTPS = 25_000_000;       // 25 MB
 
 // Helper to convert Uint8Array to base64 without stack overflow
 // Note: String.fromCharCode(...largeArray) crashes with "Maximum call stack size exceeded" for arrays > ~100KB
@@ -34,6 +45,119 @@ let cachedSendPubkey: string | null = null;
 
 // Cached ephemeral key for requests that return encrypted data
 let cachedEphemeralKey: PrivateKey | null = null;
+
+// Payment Key configuration
+let paymentKeyConfig: {
+  enabled: boolean;
+  key: string | null;
+  owner: string | null;
+} = {
+  enabled: false,
+  key: null,
+  owner: null,
+};
+
+// Parse payment key format: owner:nonce:secret
+function parsePaymentKey(key: string): { owner: string; nonce: string; secret: string } | null {
+  const parts = key.split(':');
+  if (parts.length < 3) return null;
+  const owner = parts[0];
+  const nonce = parts[1];
+  const secret = parts.slice(2).join(':'); // In case secret contains ':'
+  if (!owner || !nonce || !secret) return null;
+  return { owner, nonce, secret };
+}
+
+// Parse PROJECT_ID into owner/name for API URL
+function parseProjectId(projectId: string): { owner: string; name: string } {
+  if (projectId.includes('/')) {
+    const [owner, ...rest] = projectId.split('/');
+    return { owner, name: rest.join('/') };
+  }
+  // For PROJECT_ID without owner, assume outlayer contract owner
+  return { owner: 'outlayer.near', name: projectId };
+}
+
+// Initialize payment key from localStorage
+export function initPaymentKey(): void {
+  if (typeof window === 'undefined') return;
+
+  const storedKey = localStorage.getItem(PAYMENT_KEY_STORAGE);
+  const storedEnabled = localStorage.getItem(PAYMENT_KEY_ENABLED_STORAGE);
+
+  if (storedKey) {
+    const parsed = parsePaymentKey(storedKey);
+    if (parsed) {
+      paymentKeyConfig = {
+        enabled: storedEnabled === 'true',
+        key: storedKey,
+        owner: parsed.owner,
+      };
+    }
+  }
+}
+
+// Set payment key (returns false if invalid format)
+export function setPaymentKey(key: string | null): boolean {
+  if (key === null) {
+    paymentKeyConfig = { enabled: false, key: null, owner: null };
+    localStorage.removeItem(PAYMENT_KEY_STORAGE);
+    localStorage.removeItem(PAYMENT_KEY_ENABLED_STORAGE);
+    // Clear cached data since user identity changes
+    cachedSendPubkey = null;
+    return true;
+  }
+
+  const parsed = parsePaymentKey(key);
+  if (!parsed) return false;
+
+  paymentKeyConfig = {
+    enabled: true,
+    key,
+    owner: parsed.owner,
+  };
+  localStorage.setItem(PAYMENT_KEY_STORAGE, key);
+  localStorage.setItem(PAYMENT_KEY_ENABLED_STORAGE, 'true');
+  // Clear cached data since user identity changes
+  cachedSendPubkey = null;
+  return true;
+}
+
+// Toggle payment key mode
+export function setPaymentKeyEnabled(enabled: boolean): void {
+  paymentKeyConfig.enabled = enabled && paymentKeyConfig.key !== null;
+  if (paymentKeyConfig.enabled) {
+    localStorage.setItem(PAYMENT_KEY_ENABLED_STORAGE, 'true');
+  } else {
+    localStorage.removeItem(PAYMENT_KEY_ENABLED_STORAGE);
+  }
+  // Clear cached data since user identity may change
+  cachedSendPubkey = null;
+}
+
+// Get current payment key config for UI
+export function getPaymentKeyConfig(): { enabled: boolean; owner: string | null; hasKey: boolean } {
+  return {
+    enabled: paymentKeyConfig.enabled,
+    owner: paymentKeyConfig.owner,
+    hasKey: paymentKeyConfig.key !== null,
+  };
+}
+
+// Check if using payment key mode
+export function isPaymentKeyMode(): boolean {
+  return paymentKeyConfig.enabled && paymentKeyConfig.key !== null;
+}
+
+// Get default max output size based on current mode
+function getDefaultMaxOutputSize(): number {
+  return isPaymentKeyMode() ? MAX_OUTPUT_SIZE_HTTPS : MAX_OUTPUT_SIZE_TRANSACTION;
+}
+
+// Get payment key owner (for display when in payment key mode)
+export function getPaymentKeyOwner(): string | null {
+  return paymentKeyConfig.owner;
+}
 
 export async function initWalletSelector(): Promise<WalletSelector> {
   if (selector) return selector;
@@ -73,9 +197,101 @@ export async function signOut(): Promise<void> {
   await wallet.signOut();
 }
 
+// Call OutLayer via HTTPS API (Payment Key mode)
+async function callOutLayerHttps(action: string, params: Record<string, any>): Promise<any> {
+  if (!paymentKeyConfig.key) {
+    throw new Error('Payment key not configured');
+  }
+
+  const { owner, name } = parseProjectId(PROJECT_ID);
+
+  // Use proxy for localhost to avoid CORS issues
+  const isLocalhost = typeof window !== 'undefined' &&
+    (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+  const baseUrl = isLocalhost ? '/api/outlayer' : OUTLAYER_API_URL;
+  const url = `${baseUrl}/call/${owner}/${name}`;
+  console.log('📤 OutLayer HTTPS URL:', url);
+
+  const inputData = {
+    action,
+    ...params,
+  };
+
+  console.log('📤 OutLayer HTTPS input:', inputData);
+  console.log('📤 SECRETS_ACCOUNT_ID:', SECRETS_ACCOUNT_ID);
+  console.log('📤 SECRETS_PROFILE:', SECRETS_PROFILE);
+
+  // Build request body
+  const requestBody: Record<string, any> = {
+    input: inputData,
+    resource_limits: {
+      max_instructions: 500000000,  // 500M - more headroom for HTTPS
+      max_memory_mb: 256,           // 256MB - needed for larger outputs
+      max_execution_seconds: 120,   // 2 min - more time for big data
+    },
+  };
+
+  // Add secrets_ref if configured (same as transaction mode)
+  if (SECRETS_ACCOUNT_ID) {
+    requestBody.secrets_ref = {
+      profile: SECRETS_PROFILE,
+      account_id: SECRETS_ACCOUNT_ID,
+    };
+  }
+
+  console.log('📤 OutLayer HTTPS requestBody:', JSON.stringify(requestBody, null, 2));
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Payment-Key': paymentKeyConfig.key,
+    },
+    body: JSON.stringify(requestBody),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    let errorMessage: string;
+    try {
+      const errorData = JSON.parse(errorText);
+      errorMessage = errorData.error || `HTTP ${response.status}: ${response.statusText}`;
+    } catch {
+      errorMessage = errorText || `HTTP ${response.status}: ${response.statusText}`;
+    }
+    throw new Error(errorMessage);
+  }
+
+  const result = await response.json();
+
+  if (result.status === 'failed') {
+    throw new Error(result.error || 'Execution failed');
+  }
+
+  // Parse output - it's a JSON string
+  let output = result.output;
+  if (typeof output === 'string') {
+    try {
+      output = JSON.parse(output);
+    } catch {
+      // Keep as string if not valid JSON
+    }
+  }
+
+  if (output && !output.success) {
+    throw new Error(output.error || 'Unknown error');
+  }
+
+  return output;
+}
+
 // Call OutLayer via NEAR transaction
 // The signer is authenticated via the blockchain transaction (env::signer_account_id() in WASI)
 export async function callOutLayer(action: string, params: Record<string, any>): Promise<any> {
+  // Route to HTTPS API if payment key mode is enabled
+  if (isPaymentKeyMode()) {
+    return callOutLayerHttps(action, params);
+  }
   const accounts = await getAccounts();
   if (accounts.length === 0) {
     throw new Error('Not connected');
@@ -223,11 +439,11 @@ export async function getEmails(
   // Call WASI with ephemeral public key
   const params: Record<string, any> = {
     ephemeral_pubkey: ephemeralPubkeyHex,
+    max_output_size: maxOutputSize ?? getDefaultMaxOutputSize(),
   };
 
   if (inboxOffset > 0) params.inbox_offset = inboxOffset;
   if (sentOffset > 0) params.sent_offset = sentOffset;
-  if (maxOutputSize) params.max_output_size = maxOutputSize;
 
   const result = await callOutLayer('get_emails', params);
 
@@ -281,29 +497,25 @@ export async function sendEmail(
     cachedSendPubkey.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16))
   );
 
-  // Encrypt subject and body with user's public key
-  const encryptedSubject = encrypt(pubkeyBytes, new TextEncoder().encode(subject));
-  const encryptedBody = encrypt(pubkeyBytes, new TextEncoder().encode(body));
-
-  // Convert to base64
-  const encryptedSubjectB64 = uint8ArrayToBase64(encryptedSubject);
-  const encryptedBodyB64 = uint8ArrayToBase64(encryptedBody);
-
-  const params: Record<string, any> = {
+  // Create payload with all email data (to, subject, body, attachments)
+  // This keeps recipient address private on-chain
+  const payload = {
     to,
-    encrypted_subject: encryptedSubjectB64,
-    encrypted_body: encryptedBodyB64,
-    ephemeral_pubkey: ephemeralPubkeyHex,
+    subject,
+    body,
+    attachments: attachments || [],
   };
 
-  // Encrypt attachments if present
-  if (attachments && attachments.length > 0) {
-    const attachmentsJson = JSON.stringify(attachments);
-    const encryptedAttachments = encrypt(pubkeyBytes, new TextEncoder().encode(attachmentsJson));
-    params.encrypted_attachments = uint8ArrayToBase64(encryptedAttachments);
-  }
+  // Encrypt the entire payload with user's public key
+  const payloadJson = JSON.stringify(payload);
+  const encryptedData = encrypt(pubkeyBytes, new TextEncoder().encode(payloadJson));
+  const encryptedDataB64 = uint8ArrayToBase64(encryptedData);
 
-  if (maxOutputSize) params.max_output_size = maxOutputSize;
+  const params: Record<string, any> = {
+    encrypted_data: encryptedDataB64,
+    ephemeral_pubkey: ephemeralPubkeyHex,
+    max_output_size: maxOutputSize ?? getDefaultMaxOutputSize(),
+  };
 
   const result = await callOutLayer('send_email', params);
 
@@ -335,9 +547,8 @@ export async function deleteEmail(
   const params: Record<string, any> = {
     email_id: emailId,
     ephemeral_pubkey: ephemeralPubkeyHex,
+    max_output_size: maxOutputSize ?? getDefaultMaxOutputSize(),
   };
-
-  if (maxOutputSize) params.max_output_size = maxOutputSize;
 
   const result = await callOutLayer('delete_email', params);
 
@@ -364,12 +575,44 @@ export async function getEmailCount(): Promise<EmailCountResult> {
   };
 }
 
+// Get a single attachment by ID (for lazy loading)
+export interface GetAttachmentResult {
+  filename: string;
+  content_type: string;
+  size: number;
+  data: string; // base64-encoded attachment content
+}
+
+export async function getAttachment(attachmentId: string): Promise<GetAttachmentResult> {
+  // Generate ephemeral key for response decryption
+  cachedEphemeralKey = new PrivateKey();
+  const ephemeralPubkeyHex = cachedEphemeralKey.publicKey.toHex();
+
+  const result = await callOutLayer('get_attachment', {
+    attachment_id: attachmentId,
+    ephemeral_pubkey: ephemeralPubkeyHex,
+  });
+
+  // Decrypt the attachment data
+  const encryptedBytes = Uint8Array.from(atob(result.encrypted_data), c => c.charCodeAt(0));
+  const decryptedBytes = decrypt(cachedEphemeralKey.secret, encryptedBytes);
+  const data = uint8ArrayToBase64(decryptedBytes);
+
+  return {
+    filename: result.filename,
+    content_type: result.content_type,
+    size: result.size,
+    data,
+  };
+}
+
 // Types
 export interface Attachment {
   filename: string;
   content_type: string;
-  data: string; // base64-encoded
+  data?: string; // base64-encoded (for small attachments < 2KB)
   size: number;
+  attachment_id?: string; // For lazy loading (large attachments >= 2KB)
 }
 
 export interface Email {

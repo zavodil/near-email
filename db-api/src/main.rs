@@ -146,6 +146,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/internal-store", post(store_internal_email))
         .route("/sent-emails", get(get_sent_emails))
         .route("/store-sent", post(store_sent_email))
+        .route("/attachments", post(store_attachment))
+        .route("/attachments/:id", get(get_attachment))
         .route("/health", get(health))
         .layer(cors)
         .with_state(Arc::new(state));
@@ -301,6 +303,55 @@ struct StoreSentEmailBody {
 struct StoreSentResponse {
     success: bool,
     id: String,
+}
+
+/// Request to store an attachment (for lazy loading)
+#[derive(Debug, Deserialize)]
+struct StoreAttachmentBody {
+    email_id: String,
+    folder: String,  // "inbox" or "sent"
+    recipient: String,
+    filename: String,
+    content_type: String,
+    size: i32,
+    #[serde(with = "base64_serde_de")]
+    encrypted_data: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+struct StoreAttachmentResponse {
+    success: bool,
+    id: String,
+}
+
+/// Query for getting attachment
+#[derive(Debug, Deserialize)]
+struct GetAttachmentQuery {
+    recipient: String,
+}
+
+#[derive(Debug, FromRow)]
+struct AttachmentRow {
+    id: Uuid,
+    email_id: Uuid,
+    folder: String,
+    recipient: String,
+    filename: String,
+    content_type: String,
+    size: i32,
+    encrypted_data: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+struct AttachmentResponse {
+    id: String,
+    email_id: String,
+    folder: String,
+    filename: String,
+    content_type: String,
+    size: i32,
+    #[serde(with = "base64_serde")]
+    encrypted_data: Vec<u8>,
 }
 
 // Base64 deserialization helper
@@ -877,4 +928,83 @@ fn insert_signature_before_quote(body: &str, signature: &str) -> String {
         // No quote found, append at the end
         format!("{}\n\n--\n{}", body, signature)
     }
+}
+
+/// Store an attachment for lazy loading
+/// Used by WASI module when attachment is too large to include inline
+async fn store_attachment(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<StoreAttachmentBody>,
+) -> Result<Json<StoreAttachmentResponse>, StatusCode> {
+    let id = Uuid::new_v4();
+    let email_id = Uuid::parse_str(&body.email_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO attachments (id, email_id, folder, recipient, filename, content_type, size, encrypted_data, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        "#,
+    )
+    .bind(id)
+    .bind(email_id)
+    .bind(&body.folder)
+    .bind(&body.recipient)
+    .bind(&body.filename)
+    .bind(&body.content_type)
+    .bind(body.size)
+    .bind(&body.encrypted_data)
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to store attachment: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    info!(
+        "📎 Attachment {} stored: email={}, file={}, size={}B",
+        id, body.email_id, body.filename, body.size
+    );
+
+    Ok(Json(StoreAttachmentResponse {
+        success: true,
+        id: id.to_string(),
+    }))
+}
+
+/// Get an attachment by ID (must belong to recipient)
+async fn get_attachment(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<GetAttachmentQuery>,
+) -> Result<Json<AttachmentResponse>, StatusCode> {
+    let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let row: AttachmentRow = sqlx::query_as(
+        r#"
+        SELECT id, email_id, folder, recipient, filename, content_type, size, encrypted_data
+        FROM attachments
+        WHERE id = $1 AND recipient = $2
+        "#,
+    )
+    .bind(uuid)
+    .bind(&query.recipient)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to get attachment: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+    info!("📎 Attachment {} fetched for {}", id, query.recipient);
+
+    Ok(Json(AttachmentResponse {
+        id: row.id.to_string(),
+        email_id: row.email_id.to_string(),
+        folder: row.folder,
+        filename: row.filename,
+        content_type: row.content_type,
+        size: row.size,
+        encrypted_data: row.encrypted_data,
+    }))
 }

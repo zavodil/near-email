@@ -6,6 +6,11 @@ import {
   getEmails,
   sendEmail,
   deleteEmail,
+  initPaymentKey,
+  setPaymentKey,
+  setPaymentKeyEnabled,
+  getPaymentKeyConfig,
+  getPaymentKeyOwner,
   type Email,
   type SentEmail,
   type GetEmailsResult,
@@ -45,6 +50,13 @@ export default function Home({ accounts, loading }: HomeProps) {
   const [replyBody, setReplyBody] = useState('');
   // Toast state
   const [toast, setToast] = useState<{ message: string; type: ToastType } | null>(null);
+  // Payment Key state
+  const [paymentKeyEnabled, setPaymentKeyEnabledState] = useState(false);
+  const [paymentKeyOwner, setPaymentKeyOwnerState] = useState<string | null>(null);
+  const [paymentKeyHasKey, setPaymentKeyHasKey] = useState(false);
+  const [showPaymentKeyInput, setShowPaymentKeyInput] = useState(false);
+  const [paymentKeyInput, setPaymentKeyInput] = useState('');
+  const [paymentKeyError, setPaymentKeyError] = useState<string | null>(null);
 
   function showToast(message: string, type: ToastType = 'success') {
     setToast({ message, type });
@@ -54,12 +66,30 @@ export default function Home({ accounts, loading }: HomeProps) {
     return count === 1 ? singular : plural;
   }
 
+  // Initialize payment key from localStorage
+  useEffect(() => {
+    initPaymentKey();
+    const config = getPaymentKeyConfig();
+    setPaymentKeyEnabledState(config.enabled);
+    setPaymentKeyOwnerState(config.owner);
+    setPaymentKeyHasKey(config.hasKey);
+  }, []);
+
   const isConnected = accounts.length > 0;
   const accountId = isConnected ? accounts[0].accountId : null;
+
+  // Effective account: payment key owner takes precedence when enabled
+  const effectiveAccountId = paymentKeyEnabled && paymentKeyOwner
+    ? paymentKeyOwner
+    : accountId;
+
   // Handle both .near and .testnet suffixes
-  const emailAddress = accountId
-    ? `${accountId.replace('.near', '').replace('.testnet', '')}@near.email`
+  const emailAddress = effectiveAccountId
+    ? `${effectiveAccountId.replace('.near', '').replace('.testnet', '')}@near.email`
     : null;
+
+  // Can use app if wallet connected OR payment key enabled
+  const canUseApp = isConnected || paymentKeyEnabled;
 
   // Update state from combined result
   function updateFromResult(result: GetEmailsResult | { inbox: Email[]; sent: SentEmail[] }) {
@@ -142,6 +172,47 @@ export default function Home({ accounts, loading }: HomeProps) {
     setSentNextOffset(null);
   }
 
+  // Payment Key handlers
+  function handlePaymentKeyToggle() {
+    const newEnabled = !paymentKeyEnabled;
+    setPaymentKeyEnabled(newEnabled);
+    setPaymentKeyEnabledState(newEnabled);
+    // Clear cached emails since user identity may change
+    setEmails([]);
+    setSentEmails([]);
+    setHasCheckedMail(false);
+  }
+
+  function handleSavePaymentKey() {
+    setPaymentKeyError(null);
+    const success = setPaymentKey(paymentKeyInput.trim());
+    if (success) {
+      const config = getPaymentKeyConfig();
+      setPaymentKeyEnabledState(config.enabled);
+      setPaymentKeyOwnerState(config.owner);
+      setPaymentKeyHasKey(config.hasKey);
+      setShowPaymentKeyInput(false);
+      setPaymentKeyInput('');
+      // Clear cached emails since user identity changed
+      setEmails([]);
+      setSentEmails([]);
+      setHasCheckedMail(false);
+    } else {
+      setPaymentKeyError('Invalid format. Expected: owner:nonce:key');
+    }
+  }
+
+  function handleClearPaymentKey() {
+    setPaymentKey(null);
+    setPaymentKeyEnabledState(false);
+    setPaymentKeyOwnerState(null);
+    setPaymentKeyHasKey(false);
+    // Clear cached emails
+    setEmails([]);
+    setSentEmails([]);
+    setHasCheckedMail(false);
+  }
+
   async function handleDelete(emailId: string) {
     try {
       const result = await deleteEmail(emailId);
@@ -187,18 +258,18 @@ export default function Home({ accounts, loading }: HomeProps) {
     );
   }
 
-  // Check mail screen - connected but hasn't checked yet
-  if (isConnected && !hasCheckedMail) {
+  // Check mail screen - can use app but hasn't checked yet
+  if (canUseApp && !hasCheckedMail) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-gradient-to-br from-gray-50 to-gray-100">
         <h1 className="text-3xl font-bold text-gray-900 mb-6">near.email</h1>
 
         <div className="bg-white rounded-2xl shadow-xl border border-gray-100 p-6 max-w-sm w-full text-center">
           <div className="w-14 h-14 bg-gradient-to-br from-blue-400 to-blue-600 rounded-full flex items-center justify-center text-white text-xl font-bold mx-auto mb-4">
-            {accountId?.charAt(0).toUpperCase()}
+            {effectiveAccountId?.charAt(0).toUpperCase()}
           </div>
-          <p className="text-sm text-gray-500 mb-1">Connected as</p>
-          <p className="font-semibold text-gray-900 mb-1">{accountId}</p>
+          <p className="text-sm text-gray-500 mb-1">{paymentKeyEnabled ? 'Using Payment Key' : 'Connected as'}</p>
+          <p className="font-semibold text-gray-900 mb-1">{effectiveAccountId}</p>
           <p className="text-sm text-gray-400 mb-6">{emailAddress}</p>
 
           {error && (
@@ -238,8 +309,8 @@ export default function Home({ accounts, loading }: HomeProps) {
     );
   }
 
-  // Landing page for non-connected users
-  if (!isConnected) {
+  // Landing page for users who cannot use app yet
+  if (!canUseApp) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-gradient-to-br from-gray-50 to-gray-100">
         <div className="text-center mb-8">
@@ -295,6 +366,22 @@ export default function Home({ accounts, loading }: HomeProps) {
             </svg>
             Connect NEAR Wallet
           </button>
+
+          <div className="flex items-center gap-3 my-4">
+            <div className="flex-1 h-px bg-gray-200"></div>
+            <span className="text-xs text-gray-400">or</span>
+            <div className="flex-1 h-px bg-gray-200"></div>
+          </div>
+
+          <button
+            onClick={() => setShowPaymentKeyInput(true)}
+            className="w-full bg-white text-gray-700 py-2.5 px-6 rounded-xl font-medium border border-gray-300 hover:bg-gray-50 transition-colors shadow-sm flex items-center justify-center gap-2"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+            </svg>
+            Use Payment Key
+          </button>
         </div>
 
         <p className="text-xs text-gray-400 mt-6">
@@ -330,28 +417,78 @@ export default function Home({ accounts, loading }: HomeProps) {
               className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
             >
               <div className="w-6 h-6 bg-gradient-to-br from-blue-400 to-blue-600 rounded-full flex items-center justify-center text-white text-xs font-medium">
-                {accountId?.charAt(0).toUpperCase()}
+                {effectiveAccountId?.charAt(0).toUpperCase()}
               </div>
-              <span className="hidden sm:inline max-w-[120px] truncate">{accountId}</span>
+              <span className="hidden sm:inline max-w-[120px] truncate">{effectiveAccountId}</span>
               <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
               </svg>
             </button>
             {showAccountMenu && (
-              <div className="absolute right-0 mt-1 w-48 bg-white rounded-lg shadow-lg border border-gray-100 py-1 z-50">
+              <div className="absolute right-0 mt-1 w-64 bg-white rounded-lg shadow-lg border border-gray-100 py-1 z-50">
+                {/* Current account info */}
                 <div className="px-3 py-2 border-b border-gray-100">
-                  <p className="text-xs text-gray-400">Signed in as</p>
-                  <p className="text-sm font-medium text-gray-700 truncate">{accountId}</p>
+                  <p className="text-xs text-gray-400">
+                    {paymentKeyEnabled ? 'Using Payment Key' : 'Signed in as'}
+                  </p>
+                  <p className="text-sm font-medium text-gray-700 truncate">{effectiveAccountId}</p>
                 </div>
-                <button
-                  onClick={() => {
-                    handleDisconnect();
-                    setShowAccountMenu(false);
-                  }}
-                  className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
-                >
-                  Sign out
-                </button>
+
+                {/* Payment Key section */}
+                <div className="px-3 py-2 border-b border-gray-100">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-gray-600">Payment Key</span>
+                    <button
+                      onClick={handlePaymentKeyToggle}
+                      disabled={!paymentKeyHasKey}
+                      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                        paymentKeyEnabled ? 'bg-blue-600' : 'bg-gray-300'
+                      } ${!paymentKeyHasKey ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                      <span
+                        className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                          paymentKeyEnabled ? 'translate-x-4' : 'translate-x-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  {paymentKeyOwner && (
+                    <p className="text-xs text-gray-400 mt-1 truncate">
+                      {paymentKeyOwner}:*
+                    </p>
+                  )}
+
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      onClick={() => setShowPaymentKeyInput(true)}
+                      className="text-xs text-blue-600 hover:text-blue-700"
+                    >
+                      {paymentKeyHasKey ? 'Change' : 'Configure'}
+                    </button>
+                    {paymentKeyHasKey && (
+                      <button
+                        onClick={handleClearPaymentKey}
+                        className="text-xs text-red-600 hover:text-red-700"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Sign out button (only when wallet connected) */}
+                {isConnected && (
+                  <button
+                    onClick={() => {
+                      handleDisconnect();
+                      setShowAccountMenu(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                  >
+                    Sign out wallet
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -504,6 +641,66 @@ export default function Home({ accounts, loading }: HomeProps) {
           type={toast.type}
           onClose={() => setToast(null)}
         />
+      )}
+
+      {/* Payment Key input modal */}
+      {showPaymentKeyInput && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl p-4 w-full max-w-md mx-4">
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">
+              Configure Payment Key
+            </h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Enter your Payment Key to use HTTPS API instead of blockchain transactions.
+              Create keys at{' '}
+              <a
+                href="https://outlayer.xyz/dashboard"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:underline"
+              >
+                OutLayer Dashboard
+              </a>
+            </p>
+
+            {paymentKeyError && (
+              <div className="bg-red-50 text-red-700 px-3 py-2 rounded-lg text-sm mb-3 border border-red-100">
+                {paymentKeyError}
+              </div>
+            )}
+
+            <input
+              type="password"
+              value={paymentKeyInput}
+              onChange={(e) => setPaymentKeyInput(e.target.value)}
+              placeholder="alice.near:0:abcd1234..."
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onKeyDown={(e) => e.key === 'Enter' && handleSavePaymentKey()}
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              Format: owner:nonce:key
+            </p>
+
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => {
+                  setShowPaymentKeyInput(false);
+                  setPaymentKeyInput('');
+                  setPaymentKeyError(null);
+                }}
+                className="px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSavePaymentKey}
+                className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

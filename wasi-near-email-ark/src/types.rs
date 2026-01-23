@@ -40,15 +40,11 @@ pub enum Request {
 
     /// Send email from the signer's account
     /// Returns fresh inbox/sent preview after sending
+    /// All email data (to, subject, body, attachments) is encrypted in a single payload
+    /// to keep recipient address private on-chain
     SendEmail {
-        to: String,
-        /// Base64-encoded ECIES ciphertext of subject
-        encrypted_subject: String,
-        /// Base64-encoded ECIES ciphertext of body
-        encrypted_body: String,
-        /// Base64-encoded ECIES ciphertext of attachments JSON (array of {filename, content_type, data_base64})
-        #[serde(default)]
-        encrypted_attachments: Option<String>,
+        /// Base64-encoded ECIES ciphertext containing SendEmailPayload JSON
+        encrypted_data: String,
         /// Client's ephemeral public key for encrypting response
         ephemeral_pubkey: String,
         /// Max output size in bytes (default: 1.5MB)
@@ -72,6 +68,14 @@ pub enum Request {
 
     /// Get master public key (for SMTP server encryption)
     GetMasterPublicKey,
+
+    /// Get a single attachment by ID (for lazy loading)
+    GetAttachment {
+        /// Attachment ID from lazy-loaded attachment metadata
+        attachment_id: String,
+        /// Client's ephemeral secp256k1 public key (hex, 33 bytes compressed)
+        ephemeral_pubkey: String,
+    },
 }
 
 // ==================== Response Types ====================
@@ -84,6 +88,7 @@ pub enum Response {
     DeleteEmail(DeleteEmailResponse),
     GetEmailCount(GetEmailCountResponse),
     GetMasterPublicKey(GetMasterPublicKeyResponse),
+    GetAttachment(GetAttachmentResponse),
 }
 
 #[derive(Debug, Serialize)]
@@ -132,6 +137,16 @@ pub struct GetMasterPublicKeyResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct GetAttachmentResponse {
+    pub success: bool,
+    /// Base64-encoded ECIES ciphertext containing attachment data
+    pub encrypted_data: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub success: bool,
     pub error: String,
@@ -146,16 +161,34 @@ pub struct EmailData {
     pub sent: Vec<SentEmail>,
 }
 
-/// Attachment metadata with base64-encoded content
+/// Decrypted payload for SendEmail request
+/// Contains all email fields encrypted together to keep recipient private
+#[derive(Debug, Deserialize)]
+pub struct SendEmailPayload {
+    pub to: String,
+    pub subject: String,
+    pub body: String,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+/// Attachment metadata with base64-encoded content or lazy loading reference
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
     pub filename: String,
     pub content_type: String,
-    /// Base64-encoded attachment data
-    pub data: String,
+    /// Base64-encoded attachment data (for small attachments < 2KB)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
     /// Size in bytes (for display)
     pub size: usize,
+    /// Attachment ID for lazy loading (for large attachments >= 2KB)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<String>,
 }
+
+/// Threshold for lazy loading attachments (2KB)
+pub const ATTACHMENT_LAZY_THRESHOLD: usize = 2048;
 
 #[derive(Debug, Serialize)]
 pub struct Email {
@@ -227,4 +260,22 @@ pub struct DbSentEmailsResponse {
 pub struct DbStoreSentResponse {
     pub success: bool,
     pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DbStoreAttachmentResponse {
+    pub success: bool,
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DbAttachmentResponse {
+    pub id: String,
+    pub email_id: String,
+    pub folder: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: i32,
+    #[serde(deserialize_with = "deserialize_base64")]
+    pub encrypted_data: Vec<u8>,
 }
