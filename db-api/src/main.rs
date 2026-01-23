@@ -13,7 +13,13 @@ use chrono::{DateTime, Utc};
 use hickory_resolver::{config::*, TokioAsyncResolver};
 use std::net::IpAddr;
 use lettre::{
-    message::{header::ContentType, Mailbox},
+    message::{
+        header::ContentType,
+        Mailbox,
+        MultiPart,
+        SinglePart,
+        Attachment as LettreAttachment,
+    },
     transport::smtp::{
         client::{Tls, TlsParameters},
         extension::ClientId,
@@ -206,12 +212,24 @@ struct DeleteResponse {
     deleted: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct Attachment {
+    filename: String,
+    content_type: String,
+    /// Base64-encoded attachment data
+    data: String,
+    #[allow(dead_code)]
+    size: usize,
+}
+
 #[derive(Debug, Deserialize)]
 struct SendEmailBody {
     from_account: String,
     to: String,
     subject: String,
     body: String,
+    #[serde(default)]
+    attachments: Vec<Attachment>,
 }
 
 #[derive(Debug, Serialize)]
@@ -457,18 +475,59 @@ async fn send_email(
         body.body.clone()
     };
 
-    // Build email message
-    let email = Message::builder()
-        .from(from_mailbox.clone())
-        .to(to_mailbox.clone())
-        .subject(&body.subject)
-        .message_id(Some(message_id))
-        .header(ContentType::TEXT_PLAIN)
-        .body(email_body)
-        .map_err(|e| {
-            error!("Failed to build email: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    // Build email message (with or without attachments)
+    let email = if body.attachments.is_empty() {
+        // Simple text email
+        Message::builder()
+            .from(from_mailbox.clone())
+            .to(to_mailbox.clone())
+            .subject(&body.subject)
+            .message_id(Some(message_id))
+            .header(ContentType::TEXT_PLAIN)
+            .body(email_body)
+            .map_err(|e| {
+                error!("Failed to build email: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    } else {
+        // Multipart email with attachments
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        info!("Building email with {} attachment(s)", body.attachments.len());
+
+        // Create text body part
+        let text_part = SinglePart::plain(email_body);
+
+        // Start with multipart/mixed
+        let mut multipart = MultiPart::mixed().singlepart(text_part);
+
+        // Add each attachment
+        for att in &body.attachments {
+            let decoded_data = STANDARD.decode(&att.data).map_err(|e| {
+                error!("Failed to decode attachment {}: {}", att.filename, e);
+                StatusCode::BAD_REQUEST
+            })?;
+
+            // Parse content type
+            let content_type = ContentType::parse(&att.content_type).unwrap_or(ContentType::TEXT_PLAIN);
+
+            let attachment_part = LettreAttachment::new(att.filename.clone())
+                .body(decoded_data, content_type);
+
+            multipart = multipart.singlepart(attachment_part);
+        }
+
+        Message::builder()
+            .from(from_mailbox.clone())
+            .to(to_mailbox.clone())
+            .subject(&body.subject)
+            .message_id(Some(message_id))
+            .multipart(multipart)
+            .map_err(|e| {
+                error!("Failed to build multipart email: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    };
 
     // Lookup MX records
     let mx_records = state.resolver

@@ -10,6 +10,10 @@ use std::net::IpAddr;
 use tokio::runtime::Handle;
 use tracing::{error, info, warn};
 
+/// Maximum email size in bytes (50MB)
+/// Emails larger than this will be rejected
+const MAX_EMAIL_SIZE: usize = 50 * 1024 * 1024;
+
 /// SMTP handler that encrypts and stores emails
 #[derive(Clone)]
 pub struct NearEmailHandler {
@@ -24,6 +28,8 @@ pub struct NearEmailHandler {
     current_from: Option<String>,
     current_to: Vec<String>,
     current_data: Vec<u8>,
+    /// Flag indicating message exceeded size limit
+    size_exceeded: bool,
 }
 
 impl NearEmailHandler {
@@ -43,6 +49,7 @@ impl NearEmailHandler {
             current_from: None,
             current_to: Vec::new(),
             current_data: Vec::new(),
+            size_exceeded: false,
         }
     }
 
@@ -139,6 +146,7 @@ impl Handler for NearEmailHandler {
         self.current_from = None;
         self.current_to.clear();
         self.current_data.clear();
+        self.size_exceeded = false;
         response::OK
     }
 
@@ -146,6 +154,7 @@ impl Handler for NearEmailHandler {
         self.current_from = Some(from.to_string());
         self.current_to.clear();
         self.current_data.clear();
+        self.size_exceeded = false;
         response::OK
     }
 
@@ -173,6 +182,23 @@ impl Handler for NearEmailHandler {
     }
 
     fn data(&mut self, buf: &[u8]) -> io::Result<()> {
+        // Skip if already exceeded size limit
+        if self.size_exceeded {
+            return Ok(());
+        }
+
+        // Check size limit before accepting more data
+        if self.current_data.len() + buf.len() > MAX_EMAIL_SIZE {
+            warn!(
+                "Email exceeds size limit: {} + {} > {} bytes",
+                self.current_data.len(),
+                buf.len(),
+                MAX_EMAIL_SIZE
+            );
+            self.size_exceeded = true;
+            self.current_data.clear();
+            return Ok(()); // Accept data but mark as exceeded
+        }
         self.current_data.extend_from_slice(buf);
         Ok(())
     }
@@ -182,10 +208,17 @@ impl Handler for NearEmailHandler {
             return response::NO_MAILBOX;
         }
 
+        // Check if size limit was exceeded
+        if self.size_exceeded {
+            warn!("Email rejected: message too large (> {} KB)", MAX_EMAIL_SIZE / 1024);
+            return response::NO_MAILBOX; // Use NO_MAILBOX as fallback (552 not available)
+        }
+
         let from = self.current_from.clone().unwrap_or_default();
         let recipients = std::mem::take(&mut self.current_to);
         let data = std::mem::take(&mut self.current_data);
 
+        // Store email with attachments as-is
         self.process_email(&from, &recipients, &data);
 
         response::OK

@@ -1,10 +1,11 @@
-import { useState } from 'react';
-import { sendEmail } from '@/lib/near';
+import { useState, useRef } from 'react';
+import type { Attachment } from '@/lib/near';
 
 interface ComposeModalProps {
   fromAddress: string;
   onClose: () => void;
-  onSent: () => void;
+  onSent: (to: string, subject: string, body: string, attachments?: Attachment[]) => Promise<void>;
+  onSuccess?: () => void;
   // Optional initial values for reply
   initialTo?: string;
   initialSubject?: string;
@@ -15,6 +16,7 @@ export default function ComposeModal({
   fromAddress,
   onClose,
   onSent,
+  onSuccess,
   initialTo = '',
   initialSubject = '',
   initialBody = '',
@@ -22,8 +24,63 @@ export default function ComposeModal({
   const [to, setTo] = useState(initialTo);
   const [subject, setSubject] = useState(initialSubject);
   const [body, setBody] = useState(initialBody);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function formatSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function getTotalSize(): number {
+    return attachments.reduce((sum, att) => sum + att.size, 0);
+  }
+
+  async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files;
+    if (!files) return;
+
+    const maxSize = 10 * 1024 * 1024; // 10MB per file
+    const maxTotal = 40 * 1024 * 1024; // 40MB total
+
+    for (const file of Array.from(files)) {
+      if (file.size > maxSize) {
+        setError(`File "${file.name}" is too large (max 10MB per file)`);
+        continue;
+      }
+
+      if (getTotalSize() + file.size > maxTotal) {
+        setError('Total attachments size exceeds 40MB limit');
+        break;
+      }
+
+      // Read file as base64
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = (reader.result as string).split(',')[1]; // Remove data:...;base64, prefix
+        const newAttachment: Attachment = {
+          filename: file.name,
+          content_type: file.type || 'application/octet-stream',
+          data: base64,
+          size: file.size,
+        };
+        setAttachments(prev => [...prev, newAttachment]);
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // Reset input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  }
+
+  function removeAttachment(index: number) {
+    setAttachments(prev => prev.filter((_, i) => i !== index));
+  }
 
   async function handleSend() {
     if (!to.trim()) {
@@ -35,9 +92,9 @@ export default function ComposeModal({
     setError(null);
 
     try {
-      await sendEmail(to, subject, body);
-      alert('Email sent successfully!');
-      onSent();
+      await onSent(to, subject, body, attachments.length > 0 ? attachments : undefined);
+      onSuccess?.();
+      onClose();
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -46,86 +103,153 @@ export default function ComposeModal({
   }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl">
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-[85vh] flex flex-col">
         {/* Header */}
-        <div className="flex justify-between items-center p-4 border-b">
-          <h2 className="text-xl font-semibold">New Message</h2>
+        <div className="flex justify-between items-center px-4 py-3 border-b border-gray-100">
+          <h2 className="text-base font-semibold text-gray-900">New Message</h2>
           <button
             onClick={onClose}
-            className="text-gray-500 hover:text-gray-700 text-2xl leading-none"
+            className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-md transition-colors"
           >
-            &times;
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
           </button>
         </div>
 
         {/* Form */}
-        <div className="p-4 space-y-4">
+        <div className="px-4 py-3 space-y-3 overflow-y-auto flex-1">
           {error && (
-            <div className="bg-red-100 text-red-700 p-3 rounded">
+            <div className="bg-red-50 text-red-700 px-3 py-2 rounded-lg text-sm border border-red-100">
               {error}
             </div>
           )}
 
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">From</label>
-            <input
-              type="text"
-              value={fromAddress}
-              disabled
-              className="w-full px-3 py-2 border rounded bg-gray-100 text-gray-600"
-            />
+          <div className="flex items-center gap-2 py-1.5 border-b border-gray-100">
+            <label className="text-sm text-gray-400 w-14">From</label>
+            <span className="text-sm text-gray-600">{fromAddress}</span>
           </div>
 
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">To</label>
+          <div className="flex items-center gap-2 py-1.5 border-b border-gray-100">
+            <label className="text-sm text-gray-400 w-14">To</label>
             <input
               type="email"
               value={to}
               onChange={(e) => setTo(e.target.value)}
               placeholder="recipient@example.com"
-              className="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="flex-1 text-sm text-gray-900 placeholder-gray-300 focus:outline-none"
             />
           </div>
 
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">Subject</label>
+          <div className="flex items-center gap-2 py-1.5 border-b border-gray-100">
+            <label className="text-sm text-gray-400 w-14">Subject</label>
             <input
               type="text"
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
               placeholder="Subject"
-              className="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="flex-1 text-sm text-gray-900 placeholder-gray-300 focus:outline-none"
             />
           </div>
 
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">Message</label>
+          <div className="flex-1">
             <textarea
               value={body}
               onChange={(e) => setBody(e.target.value)}
-              rows={10}
+              rows={6}
               placeholder="Write your message..."
-              className="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              className="w-full text-sm text-gray-700 placeholder-gray-300 focus:outline-none resize-none"
             />
           </div>
+
+          {/* Attachments */}
+          {attachments.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-400">
+                  {attachments.length} {attachments.length === 1 ? 'file' : 'files'}
+                </span>
+                <span className="text-xs text-gray-400">
+                  {formatSize(getTotalSize())}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {attachments.map((att, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-center gap-1.5 px-2 py-1 bg-gray-50 rounded-md text-xs border border-gray-200"
+                  >
+                    <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                    </svg>
+                    <span className="text-gray-700 max-w-[120px] truncate">{att.filename}</span>
+                    <button
+                      onClick={() => removeAttachment(idx)}
+                      className="text-gray-400 hover:text-red-500 transition-colors"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Footer */}
-        <div className="flex justify-end gap-3 p-4 border-t bg-gray-50 rounded-b-lg">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-gray-600 hover:text-gray-800 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSend}
-            disabled={sending}
-            className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors disabled:opacity-50"
-          >
-            {sending ? 'Sending...' : 'Send'}
-          </button>
+        <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 bg-gray-50/50 rounded-b-2xl">
+          <div className="flex items-center gap-1">
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileSelect}
+              multiple
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+              title="Attach file"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+              </svg>
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSend}
+              disabled={sending}
+              className="flex items-center gap-1.5 px-4 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 shadow-sm"
+            >
+              {sending ? (
+                <>
+                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                  Sending...
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                  </svg>
+                  Send
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </div>

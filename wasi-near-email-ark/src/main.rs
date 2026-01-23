@@ -19,7 +19,6 @@ use types::*;
 
 fn main() {
     // Force storage interface import by actually calling it (required for project context)
-    // This ensures the linker includes the near:storage/api interface
     let _ = storage::has("_init");
 
     let result = process();
@@ -48,13 +47,13 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
     let input: Request = serde_json::from_slice(&raw_input)
         .map_err(|e| format!("Failed to parse input: {}. Raw: {}", e, raw_str))?;
 
-    // Get master private key from secrets (PRIVATE_ prefix for OutLayer private secrets)
+    // Get master private key from secrets
     let master_privkey_hex = std::env::var("PROTECTED_MASTER_KEY")
         .map_err(|_| "PROTECTED_MASTER_KEY not configured")?;
 
     let master_privkey = crypto::parse_private_key(&master_privkey_hex)?;
 
-    // Helper to get database API URL (lazy, only when needed)
+    // Helper to get database API URL
     let get_db_api_url = || -> Result<String, Box<dyn std::error::Error>> {
         std::env::var("DATABASE_API_URL")
             .map_err(|_| "DATABASE_API_URL not configured".into())
@@ -67,8 +66,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
     // Email signature template (use %account% for sender's NEAR account)
     let email_signature = std::env::var("EMAIL_SIGNATURE").ok();
 
-    // Get authenticated signer from OutLayer (set by blockchain transaction)
-    // This is the account that signed the transaction to outlayer contract
+    // Get authenticated signer from OutLayer
     let get_signer = || -> Result<String, Box<dyn std::error::Error>> {
         env::signer_account_id()
             .ok_or_else(|| "No signer account - must be called via NEAR transaction".into())
@@ -77,67 +75,44 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
     match input {
         Request::GetEmails {
             ephemeral_pubkey,
-            limit,
-            offset,
+            max_output_size,
+            inbox_offset,
+            sent_offset,
         } => {
             use base64::{engine::general_purpose::STANDARD, Engine};
 
-            // Get authenticated signer
             let account_id = get_signer()?;
-
-            // Parse client's ephemeral public key (hex -> bytes)
+            let max_size = max_output_size.unwrap_or(DEFAULT_MAX_OUTPUT_SIZE);
             let ephemeral_pubkey_bytes = hex::decode(&ephemeral_pubkey)
                 .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?;
 
             // Derive user's private key for decryption
             let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
 
-            // Fetch encrypted emails from database
-            let encrypted_emails = db::fetch_emails(
+            // Fetch and decrypt emails with size limit
+            let (email_data, inbox_next, sent_next) = fetch_combined_emails(
                 &get_db_api_url()?,
                 &account_id,
-                limit.unwrap_or(50),
-                offset.unwrap_or(0),
+                &user_privkey,
+                max_size,
+                inbox_offset.unwrap_or(0),
+                sent_offset.unwrap_or(0),
             )?;
 
-            // Decrypt emails
-            let mut emails = Vec::new();
-            for enc_email in encrypted_emails {
-                match crypto::decrypt_email(&user_privkey, &enc_email.encrypted_data) {
-                    Ok(decrypted) => {
-                        // Parse email content
-                        let parsed = parse_email(&decrypted)?;
-                        emails.push(Email {
-                            id: enc_email.id,
-                            from: enc_email.sender_email,
-                            subject: parsed.subject,
-                            body: parsed.body,
-                            received_at: enc_email.received_at,
-                        });
-                    }
-                    Err(e) => {
-                        // Log decryption error but continue with other emails
-                        eprintln!("Failed to decrypt email {}: {}", enc_email.id, e);
-                    }
-                }
-            }
-
-            // Serialize emails to JSON
-            let emails_json = serde_json::to_vec(&emails)?;
-
-            // Re-encrypt with client's ephemeral public key
-            // This ensures the response is only readable by the client
-            let encrypted_response = ecies::encrypt(&ephemeral_pubkey_bytes, &emails_json)
+            // Serialize and encrypt
+            let data_json = serde_json::to_vec(&email_data)?;
+            let encrypted = ecies::encrypt(&ephemeral_pubkey_bytes, &data_json)
                 .map_err(|e| format!("Failed to encrypt response: {}", e))?;
 
             // Get signer's public key for encrypting outgoing emails
             let send_pubkey = crypto::derive_user_pubkey(&master_privkey, &account_id)?;
-            let send_pubkey_hex = hex::encode(&send_pubkey);
 
             Ok(Response::GetEmails(GetEmailsResponse {
                 success: true,
-                encrypted_emails: STANDARD.encode(&encrypted_response),
-                send_pubkey: send_pubkey_hex,
+                encrypted_data: STANDARD.encode(&encrypted),
+                send_pubkey: hex::encode(&send_pubkey),
+                inbox_next_offset: inbox_next,
+                sent_next_offset: sent_next,
             }))
         }
 
@@ -145,14 +120,18 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             to,
             encrypted_subject,
             encrypted_body,
+            encrypted_attachments,
+            ephemeral_pubkey,
+            max_output_size,
         } => {
             use base64::{engine::general_purpose::STANDARD, Engine};
 
-            // Get authenticated signer
             let account_id = get_signer()?;
+            let max_size = max_output_size.unwrap_or(DEFAULT_MAX_OUTPUT_SIZE);
+            let ephemeral_pubkey_bytes = hex::decode(&ephemeral_pubkey)
+                .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?;
 
-            // Validate sender account - must end with expected suffix (.near/.testnet)
-            // This ensures replies can be delivered back to the sender
+            // Validate sender account
             validate_sender_account(&account_id, &default_account_suffix)?;
 
             // Derive user's private key for decryption
@@ -172,18 +151,30 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             let body = String::from_utf8(body_bytes)
                 .map_err(|e| format!("Invalid UTF-8 in body: {}", e))?;
 
+            // Decrypt attachments if present
+            let attachments: Vec<Attachment> = if let Some(enc_att) = encrypted_attachments {
+                let att_ciphertext = STANDARD.decode(&enc_att)
+                    .map_err(|e| format!("Invalid encrypted_attachments base64: {}", e))?;
+                let att_bytes = crypto::decrypt_email(&user_privkey, &att_ciphertext)?;
+                let att_json = String::from_utf8(att_bytes)
+                    .map_err(|e| format!("Invalid UTF-8 in attachments: {}", e))?;
+                serde_json::from_str(&att_json)
+                    .map_err(|e| format!("Invalid attachments JSON: {}", e))?
+            } else {
+                Vec::new()
+            };
+
             // Check if internal email (@near.email)
             let internal_suffix = "@near.email";
-            // Get tx_hash if available (for blockchain calls)
             let tx_hash = env::transaction_hash();
 
-            // Strip suffix from account_id for email address (zavodil.testnet -> zavodil@near.email)
+            // Build sender email address
             let sender_local = account_id
                 .strip_suffix(&default_account_suffix)
                 .unwrap_or(&account_id);
             let sender_email = format!("{}@near.email", sender_local);
 
-            // Add signature if configured (before quoted text if present)
+            // Add signature if configured
             let body_with_sig = if let Some(ref sig_template) = email_signature {
                 let signature = sig_template.replace("%account%", &account_id);
                 insert_signature_before_quote(&body, &signature)
@@ -191,37 +182,32 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 body.clone()
             };
 
-            // Build email content for sent folder (simple format)
-            let sent_email_content = format!(
-                "From: {}\r\nTo: {}\r\nSubject: {}\r\n\r\n{}",
-                sender_email, to, subject, body_with_sig
+            // Build email content (with or without attachments)
+            let email_content = build_email_content(
+                &sender_email,
+                &to,
+                &subject,
+                &body_with_sig,
+                &attachments,
             );
 
             // Encrypt email for sender's sent folder
             let encrypted_for_sender = crypto::encrypt_for_account(
                 &master_privkey,
                 &account_id,
-                sent_email_content.as_bytes(),
+                email_content.as_bytes(),
             )?;
 
-            if to.to_lowercase().ends_with(internal_suffix) {
+            let message_id = if to.to_lowercase().ends_with(internal_suffix) {
                 // Internal email - encrypt and store directly
                 let recipient_account = extract_account_from_email(&to, internal_suffix, &default_account_suffix);
 
-                // Build email content for recipient (same as above)
-                let email_content = format!(
-                    "From: {}\r\nTo: {}\r\nSubject: {}\r\n\r\n{}",
-                    sender_email, to, subject, body_with_sig
-                );
-
-                // Encrypt for recipient
                 let encrypted = crypto::encrypt_for_account(
                     &master_privkey,
                     &recipient_account,
                     email_content.as_bytes(),
                 )?;
 
-                // Store in recipient's inbox
                 let email_id = db::store_internal_email(
                     &get_db_api_url()?,
                     &recipient_account,
@@ -238,13 +224,17 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                     tx_hash.as_deref(),
                 );
 
-                Ok(Response::SendEmail(SendEmailResponse {
-                    success: true,
-                    message_id: Some(email_id),
-                }))
+                Some(email_id)
             } else {
-                // External email - send via SMTP relay
-                db::send_email(&get_db_api_url()?, &account_id, &to, &subject, &body)?;
+                // External email - send via SMTP relay with attachments
+                db::send_email_with_attachments(
+                    &get_db_api_url()?,
+                    &account_id,
+                    &to,
+                    &subject,
+                    &body_with_sig,
+                    &attachments,
+                )?;
 
                 // Store in sender's sent folder
                 let _ = db::store_sent_email(
@@ -255,44 +245,83 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                     tx_hash.as_deref(),
                 );
 
-                Ok(Response::SendEmail(SendEmailResponse {
-                    success: true,
-                    message_id: None,
-                }))
-            }
+                None
+            };
+
+            // Fetch fresh inbox/sent preview after sending
+            let (email_data, _, _) = fetch_combined_emails(
+                &get_db_api_url()?,
+                &account_id,
+                &user_privkey,
+                max_size,
+                0, // Fresh from start
+                0,
+            )?;
+
+            let data_json = serde_json::to_vec(&email_data)?;
+            let encrypted = ecies::encrypt(&ephemeral_pubkey_bytes, &data_json)
+                .map_err(|e| format!("Failed to encrypt response: {}", e))?;
+
+            Ok(Response::SendEmail(SendEmailResponse {
+                success: true,
+                message_id,
+                encrypted_data: STANDARD.encode(&encrypted),
+            }))
         }
 
         Request::DeleteEmail {
             email_id,
+            ephemeral_pubkey,
+            max_output_size,
         } => {
-            // Get authenticated signer
+            use base64::{engine::general_purpose::STANDARD, Engine};
+
             let account_id = get_signer()?;
+            let max_size = max_output_size.unwrap_or(DEFAULT_MAX_OUTPUT_SIZE);
+            let ephemeral_pubkey_bytes = hex::decode(&ephemeral_pubkey)
+                .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?;
 
             // Delete email from database
             let deleted = db::delete_email(&get_db_api_url()?, &email_id, &account_id)?;
 
+            // Derive user's private key for decryption
+            let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
+
+            // Fetch fresh inbox/sent preview after deleting
+            let (email_data, _, _) = fetch_combined_emails(
+                &get_db_api_url()?,
+                &account_id,
+                &user_privkey,
+                max_size,
+                0,
+                0,
+            )?;
+
+            let data_json = serde_json::to_vec(&email_data)?;
+            let encrypted = ecies::encrypt(&ephemeral_pubkey_bytes, &data_json)
+                .map_err(|e| format!("Failed to encrypt response: {}", e))?;
+
             Ok(Response::DeleteEmail(DeleteEmailResponse {
                 success: true,
                 deleted,
+                encrypted_data: STANDARD.encode(&encrypted),
             }))
         }
 
         Request::GetEmailCount => {
-            // Get authenticated signer
             let account_id = get_signer()?;
 
-            // Get email count
-            let count = db::count_emails(&get_db_api_url()?, &account_id)?;
+            let inbox_count = db::count_emails(&get_db_api_url()?, &account_id)?;
+            let sent_count = db::count_sent_emails(&get_db_api_url()?, &account_id)?;
 
             Ok(Response::GetEmailCount(GetEmailCountResponse {
                 success: true,
-                count,
+                inbox_count,
+                sent_count,
             }))
         }
 
         Request::GetMasterPublicKey => {
-            // Return master public key for SMTP server encryption
-            // No authentication needed - public key is safe to share
             let pubkey_hex = crypto::get_master_pubkey(&master_privkey);
 
             Ok(Response::GetMasterPublicKey(GetMasterPublicKeyResponse {
@@ -300,71 +329,180 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 public_key: pubkey_hex,
             }))
         }
-
-        Request::GetSentEmails {
-            ephemeral_pubkey,
-            limit,
-            offset,
-        } => {
-            use base64::{engine::general_purpose::STANDARD, Engine};
-
-            // Get authenticated signer
-            let account_id = get_signer()?;
-
-            // Parse client's ephemeral public key (hex -> bytes)
-            let ephemeral_pubkey_bytes = hex::decode(&ephemeral_pubkey)
-                .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?;
-
-            // Derive user's private key for decryption
-            let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
-
-            // Fetch encrypted sent emails from database
-            let encrypted_emails = db::fetch_sent_emails(
-                &get_db_api_url()?,
-                &account_id,
-                limit.unwrap_or(50),
-                offset.unwrap_or(0),
-            )?;
-
-            // Decrypt sent emails
-            let mut emails = Vec::new();
-            for enc_email in encrypted_emails {
-                match crypto::decrypt_email(&user_privkey, &enc_email.encrypted_data) {
-                    Ok(decrypted) => {
-                        // Parse email content
-                        let parsed = parse_email(&decrypted)?;
-                        emails.push(SentEmail {
-                            id: enc_email.id,
-                            to: enc_email.recipient_email,
-                            subject: parsed.subject,
-                            body: parsed.body,
-                            tx_hash: enc_email.tx_hash,
-                            sent_at: enc_email.sent_at,
-                        });
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to decrypt sent email {}: {}", enc_email.id, e);
-                    }
-                }
-            }
-
-            // Serialize emails to JSON
-            let emails_json = serde_json::to_vec(&emails)?;
-
-            // Re-encrypt with client's ephemeral public key
-            let encrypted_response = ecies::encrypt(&ephemeral_pubkey_bytes, &emails_json)
-                .map_err(|e| format!("Failed to encrypt response: {}", e))?;
-
-            Ok(Response::GetSentEmails(GetSentEmailsResponse {
-                success: true,
-                encrypted_emails: STANDARD.encode(&encrypted_response),
-            }))
-        }
     }
 }
 
-/// Parse decrypted email content
+/// Fetch combined inbox + sent emails with size limit
+/// Returns (EmailData, inbox_next_offset, sent_next_offset)
+fn fetch_combined_emails(
+    api_url: &str,
+    account_id: &str,
+    user_privkey: &libsecp256k1::SecretKey,
+    max_size: usize,
+    inbox_offset: i64,
+    sent_offset: i64,
+) -> Result<(EmailData, Option<i64>, Option<i64>), Box<dyn std::error::Error>> {
+    // Reserve some space for JSON overhead and encryption
+    let effective_max = max_size.saturating_sub(10_000);
+    let mut current_size: usize = 0;
+
+    // Fetch inbox emails
+    let encrypted_inbox = db::fetch_emails(api_url, account_id, 100, inbox_offset)?;
+    let mut inbox_emails = Vec::new();
+    let mut inbox_next: Option<i64> = None;
+
+    for (idx, enc_email) in encrypted_inbox.into_iter().enumerate() {
+        match crypto::decrypt_email(user_privkey, &enc_email.encrypted_data) {
+            Ok(decrypted) => {
+                let parsed = parse_email(&decrypted)?;
+
+                // Calculate full email size with attachments
+                let attachments_size: usize = parsed.attachments.iter()
+                    .map(|a| a.filename.len() + a.content_type.len() + a.data.len() + 50)
+                    .sum();
+
+                let full_email_size = enc_email.id.len() + enc_email.sender_email.len() +
+                    parsed.subject.len() + parsed.body.len() + enc_email.received_at.len() +
+                    attachments_size + 100;
+
+                // Size of a truncated email (without body content and attachments)
+                let truncated_size = enc_email.id.len() + enc_email.sender_email.len() +
+                    parsed.subject.len() + 100 + enc_email.received_at.len() + 100;
+
+                if current_size + full_email_size <= effective_max {
+                    // Full email fits
+                    let email = Email {
+                        id: enc_email.id,
+                        from: enc_email.sender_email,
+                        subject: parsed.subject,
+                        body: parsed.body,
+                        received_at: enc_email.received_at,
+                        attachments: parsed.attachments,
+                    };
+                    current_size += full_email_size;
+                    inbox_emails.push(email);
+                } else if current_size + truncated_size <= effective_max {
+                    // Email too large, show truncated version
+                    let att_count = parsed.attachments.len();
+                    let att_info = if att_count > 0 {
+                        format!("\n\n[{} attachment(s) not shown]", att_count)
+                    } else {
+                        String::new()
+                    };
+
+                    let email = Email {
+                        id: enc_email.id,
+                        from: enc_email.sender_email,
+                        subject: parsed.subject,
+                        body: format!("[Email too large to display in this view]{}", att_info),
+                        received_at: enc_email.received_at,
+                        attachments: Vec::new(),
+                    };
+                    current_size += truncated_size;
+                    inbox_emails.push(email);
+                } else {
+                    // Can't fit even truncated version, stop here
+                    inbox_next = Some(inbox_offset + idx as i64);
+                    break;
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to decrypt inbox email {}: {}", enc_email.id, e);
+            }
+        }
+    }
+
+    // Check if there are more inbox emails
+    if inbox_next.is_none() && inbox_emails.len() == 100 {
+        // Fetched max limit, there might be more
+        inbox_next = Some(inbox_offset + 100);
+    }
+
+    // Fetch sent emails (if still under size limit)
+    let encrypted_sent = db::fetch_sent_emails(api_url, account_id, 100, sent_offset)?;
+    let mut sent_emails = Vec::new();
+    let mut sent_next: Option<i64> = None;
+
+    for (idx, enc_email) in encrypted_sent.into_iter().enumerate() {
+        match crypto::decrypt_email(user_privkey, &enc_email.encrypted_data) {
+            Ok(decrypted) => {
+                let parsed = parse_email(&decrypted)?;
+
+                let attachments_size: usize = parsed.attachments.iter()
+                    .map(|a| a.filename.len() + a.content_type.len() + a.data.len() + 50)
+                    .sum();
+
+                let full_email_size = enc_email.id.len() + enc_email.recipient_email.len() +
+                    parsed.subject.len() + parsed.body.len() + enc_email.sent_at.len() +
+                    attachments_size + 100;
+
+                let truncated_size = enc_email.id.len() + enc_email.recipient_email.len() +
+                    parsed.subject.len() + 100 + enc_email.sent_at.len() + 100;
+
+                if current_size + full_email_size <= effective_max {
+                    // Full email fits
+                    let email = SentEmail {
+                        id: enc_email.id,
+                        to: enc_email.recipient_email,
+                        subject: parsed.subject,
+                        body: parsed.body,
+                        tx_hash: enc_email.tx_hash,
+                        sent_at: enc_email.sent_at,
+                        attachments: parsed.attachments,
+                    };
+                    current_size += full_email_size;
+                    sent_emails.push(email);
+                } else if current_size + truncated_size <= effective_max {
+                    // Email too large, show truncated version
+                    let att_count = parsed.attachments.len();
+                    let att_info = if att_count > 0 {
+                        format!("\n\n[{} attachment(s) not shown]", att_count)
+                    } else {
+                        String::new()
+                    };
+
+                    let email = SentEmail {
+                        id: enc_email.id,
+                        to: enc_email.recipient_email,
+                        subject: parsed.subject,
+                        body: format!("[Email too large to display in this view]{}", att_info),
+                        tx_hash: enc_email.tx_hash,
+                        sent_at: enc_email.sent_at,
+                        attachments: Vec::new(),
+                    };
+                    current_size += truncated_size;
+                    sent_emails.push(email);
+                } else {
+                    // Can't fit even truncated version, stop here
+                    sent_next = Some(sent_offset + idx as i64);
+                    break;
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to decrypt sent email {}: {}", enc_email.id, e);
+            }
+        }
+    }
+
+    // Check if there are more sent emails
+    if sent_next.is_none() && sent_emails.len() == 100 {
+        sent_next = Some(sent_offset + 100);
+    }
+
+    Ok((
+        EmailData {
+            inbox: inbox_emails,
+            sent: sent_emails,
+        },
+        inbox_next,
+        sent_next,
+    ))
+}
+
+/// Parse decrypted email content including attachments
 fn parse_email(data: &[u8]) -> Result<ParsedEmail, Box<dyn std::error::Error>> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
     let parsed = mailparse::parse_mail(data)?;
 
     let subject = parsed
@@ -374,21 +512,21 @@ fn parse_email(data: &[u8]) -> Result<ParsedEmail, Box<dyn std::error::Error>> {
         .map(|h| h.get_value())
         .unwrap_or_default();
 
-    // Try to get body - for simple emails it's in the main part,
-    // for multipart emails we need to check subparts
     let body = if parsed.subparts.is_empty() {
         parsed.get_body()?
     } else {
-        // Find first text/plain or text/html part
         find_body_part(&parsed).unwrap_or_default()
     };
 
-    Ok(ParsedEmail { subject, body })
+    // Extract attachments
+    let mut attachments = Vec::new();
+    extract_attachments(&parsed, &mut attachments);
+
+    Ok(ParsedEmail { subject, body, attachments })
 }
 
 /// Recursively find text body in email parts
 fn find_body_part(mail: &mailparse::ParsedMail) -> Option<String> {
-    // Check this part first
     let ctype = mail.ctype.mimetype.to_lowercase();
     if ctype.starts_with("text/plain") || ctype.starts_with("text/html") {
         if let Ok(body) = mail.get_body() {
@@ -398,7 +536,6 @@ fn find_body_part(mail: &mailparse::ParsedMail) -> Option<String> {
         }
     }
 
-    // Check subparts
     for part in &mail.subparts {
         if let Some(body) = find_body_part(part) {
             return Some(body);
@@ -408,17 +545,74 @@ fn find_body_part(mail: &mailparse::ParsedMail) -> Option<String> {
     None
 }
 
+/// Recursively extract attachments from email parts
+fn extract_attachments(mail: &mailparse::ParsedMail, attachments: &mut Vec<types::Attachment>) {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    // Check Content-Disposition header for attachment
+    let disposition = mail.headers
+        .iter()
+        .find(|h| h.get_key().eq_ignore_ascii_case("content-disposition"))
+        .map(|h| h.get_value().to_lowercase());
+
+    let is_attachment = disposition.as_ref().map(|d| d.starts_with("attachment")).unwrap_or(false);
+    let is_inline_file = disposition.as_ref().map(|d| d.starts_with("inline")).unwrap_or(false);
+
+    // Get filename from Content-Disposition or Content-Type
+    let filename = mail.ctype.params.get("name")
+        .cloned()
+        .or_else(|| {
+            // Try to extract filename from Content-Disposition
+            if let Some(disp) = &disposition {
+                if let Some(start) = disp.find("filename=") {
+                    let rest = &disp[start + 9..];
+                    let name = rest.trim_start_matches('"').split('"').next()
+                        .or_else(|| rest.split(';').next())
+                        .map(|s| s.trim().to_string());
+                    return name;
+                }
+            }
+            None
+        });
+
+    let content_type = &mail.ctype.mimetype;
+
+    // Include as attachment if:
+    // 1. Has Content-Disposition: attachment, OR
+    // 2. Has a filename and is not text/plain or text/html body
+    let should_include = is_attachment ||
+        (filename.is_some() && !content_type.starts_with("text/plain") && !content_type.starts_with("text/html")) ||
+        (is_inline_file && filename.is_some() && content_type.starts_with("image/"));
+
+    if should_include {
+        if let Ok(body_bytes) = mail.get_body_raw() {
+            let size = body_bytes.len();
+            let data = STANDARD.encode(&body_bytes);
+            let fname = filename.unwrap_or_else(|| "attachment".to_string());
+
+            attachments.push(types::Attachment {
+                filename: fname,
+                content_type: content_type.clone(),
+                data,
+                size,
+            });
+        }
+    }
+
+    // Recurse into subparts
+    for part in &mail.subparts {
+        extract_attachments(part, attachments);
+    }
+}
+
 struct ParsedEmail {
     subject: String,
     body: String,
+    attachments: Vec<types::Attachment>,
 }
 
 /// Validate that account_id is allowed to send emails
-/// - Must end with the expected suffix (.near for mainnet, .testnet for testnet)
-/// - Must NOT be an implicit account (64-char hex)
-/// Returns Ok(()) if valid, Err with message if invalid
 fn validate_sender_account(account_id: &str, expected_suffix: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Check for implicit accounts (64 hex characters)
     if account_id.len() == 64 && account_id.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!(
             "Implicit accounts cannot send emails. Please use a named account ending with {}",
@@ -426,10 +620,9 @@ fn validate_sender_account(account_id: &str, expected_suffix: &str) -> Result<()
         ).into());
     }
 
-    // Check that account ends with expected suffix
     if !account_id.ends_with(expected_suffix) {
         return Err(format!(
-            "Account '{}' cannot send emails. Only accounts ending with '{}' are supported. Replies will not be delivered to accounts from other zones.",
+            "Account '{}' cannot send emails. Only accounts ending with '{}' are supported.",
             account_id, expected_suffix
         ).into());
     }
@@ -438,8 +631,6 @@ fn validate_sender_account(account_id: &str, expected_suffix: &str) -> Result<()
 }
 
 /// Extract NEAR account ID from email address
-/// e.g., "vadim@near.email" -> "vadim.near" (mainnet) or "vadim.testnet" (testnet)
-/// e.g., "vadim.testnet@near.email" -> "vadim.testnet" (explicit)
 fn extract_account_from_email(email: &str, email_suffix: &str, default_account_suffix: &str) -> String {
     let email_lower = email.to_lowercase();
     let local_part = email_lower
@@ -447,8 +638,6 @@ fn extract_account_from_email(email: &str, email_suffix: &str, default_account_s
         .unwrap_or(&email_lower)
         .to_string();
 
-    // If already has a dot (e.g., vadim.testnet), keep as is
-    // Otherwise add default suffix (.near or .testnet)
     if local_part.contains('.') {
         local_part
     } else {
@@ -456,28 +645,88 @@ fn extract_account_from_email(email: &str, email_suffix: &str, default_account_s
     }
 }
 
-/// Insert signature before quoted text markers, or at the end if no quote found
+/// Build email content with optional attachments (MIME multipart if needed)
+fn build_email_content(
+    from: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    attachments: &[Attachment],
+) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    if attachments.is_empty() {
+        // Simple text email
+        format!(
+            "From: {}\r\nTo: {}\r\nSubject: {}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{}",
+            from, to, subject, body
+        )
+    } else {
+        // MIME multipart email with attachments
+        let boundary = format!("----=_Part_{:016x}", rand_u64());
+
+        let mut result = String::new();
+        result.push_str(&format!("From: {}\r\n", from));
+        result.push_str(&format!("To: {}\r\n", to));
+        result.push_str(&format!("Subject: {}\r\n", subject));
+        result.push_str("MIME-Version: 1.0\r\n");
+        result.push_str(&format!("Content-Type: multipart/mixed; boundary=\"{}\"\r\n", boundary));
+        result.push_str("\r\n");
+
+        // Body part
+        result.push_str(&format!("--{}\r\n", boundary));
+        result.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+        result.push_str("Content-Transfer-Encoding: 8bit\r\n");
+        result.push_str("\r\n");
+        result.push_str(body);
+        result.push_str("\r\n");
+
+        // Attachment parts
+        for att in attachments {
+            result.push_str(&format!("--{}\r\n", boundary));
+            result.push_str(&format!("Content-Type: {}; name=\"{}\"\r\n", att.content_type, att.filename));
+            result.push_str("Content-Transfer-Encoding: base64\r\n");
+            result.push_str(&format!("Content-Disposition: attachment; filename=\"{}\"\r\n", att.filename));
+            result.push_str("\r\n");
+            // Split base64 into 76-char lines
+            for chunk in att.data.as_bytes().chunks(76) {
+                result.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+                result.push_str("\r\n");
+            }
+        }
+
+        // End boundary
+        result.push_str(&format!("--{}--\r\n", boundary));
+
+        result
+    }
+}
+
+/// Simple pseudo-random u64 for boundary generation
+fn rand_u64() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    now.as_nanos() as u64 ^ 0xDEADBEEF
+}
+
+/// Insert signature before quoted text markers
 fn insert_signature_before_quote(body: &str, signature: &str) -> String {
-    // Common quote markers
     let quote_markers = [
         "-------- Original Message --------",
         "---------- Forwarded message ---------",
-        "On ", // "On Mon, Jan 23, 2026 at..." - but need to check it looks like a quote
     ];
 
-    // Find earliest quote marker position
     let mut earliest_pos: Option<usize> = None;
 
-    for marker in &quote_markers[..2] {
-        // Check exact markers first
+    for marker in &quote_markers {
         if let Some(pos) = body.find(marker) {
             earliest_pos = Some(earliest_pos.map_or(pos, |e| e.min(pos)));
         }
     }
 
-    // Check for "On ... wrote:" pattern (common in Gmail replies)
     if let Some(on_pos) = body.find("\nOn ") {
-        // Check if this line ends with "wrote:" somewhere after
         let after_on = &body[on_pos..];
         if after_on.contains("wrote:") || after_on.contains("написал:") {
             earliest_pos = Some(earliest_pos.map_or(on_pos, |e| e.min(on_pos)));
@@ -485,12 +734,10 @@ fn insert_signature_before_quote(body: &str, signature: &str) -> String {
     }
 
     if let Some(pos) = earliest_pos {
-        // Insert signature before the quoted text
         let (before, after) = body.split_at(pos);
         let before_trimmed = before.trim_end();
         format!("{}\r\n\r\n--\r\n{}\r\n\r\n{}", before_trimmed, signature, after)
     } else {
-        // No quote found, append at the end
         format!("{}\r\n\r\n--\r\n{}", body, signature)
     }
 }

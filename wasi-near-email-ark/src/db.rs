@@ -44,6 +44,18 @@ pub fn send_email(
     subject: &str,
     body_text: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    send_email_with_attachments(api_url, from_account, to, subject, body_text, &[])
+}
+
+/// Send email with attachments via SMTP relay
+pub fn send_email_with_attachments(
+    api_url: &str,
+    from_account: &str,
+    to: &str,
+    subject: &str,
+    body_text: &str,
+    attachments: &[crate::types::Attachment],
+) -> Result<(), Box<dyn std::error::Error>> {
     let url = format!("{}/send", api_url);
 
     let payload = serde_json::json!({
@@ -51,6 +63,7 @@ pub fn send_email(
         "to": to,
         "subject": subject,
         "body": body_text,
+        "attachments": attachments,
     });
 
     let body_data = serde_json::to_vec(&payload)?;
@@ -220,4 +233,26 @@ pub fn store_sent_email(
     let result: DbStoreSentResponse = serde_json::from_slice(&body)?;
 
     Ok(result.id)
+}
+
+/// Count sent emails for account
+pub fn count_sent_emails(
+    api_url: &str,
+    account_id: &str,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let url = format!("{}/sent-emails/count?sender={}", api_url, account_id);
+
+    let response = Client::new()
+        .get(&url)
+        .connect_timeout(TIMEOUT)
+        .send()?;
+
+    if response.status() != 200 {
+        return Err(format!("Count sent emails failed: {}", response.status()).into());
+    }
+
+    let body = response.body()?;
+    let result: DbCountResponse = serde_json::from_slice(&body)?;
+
+    Ok(result.count)
 }

@@ -22,6 +22,9 @@ let modal: ReturnType<typeof setupModal> | null = null;
 // Set by getEmails(), required by sendEmail()
 let cachedSendPubkey: string | null = null;
 
+// Cached ephemeral key for requests that return encrypted data
+let cachedEphemeralKey: PrivateKey | null = null;
+
 export async function initWalletSelector(): Promise<WalletSelector> {
   if (selector) return selector;
 
@@ -170,21 +173,53 @@ export async function callOutLayer(action: string, params: Record<string, any>):
   return response;
 }
 
+// Decrypt encrypted_data field using cached ephemeral key
+function decryptEmailData(encryptedBase64: string): EmailData {
+  if (!cachedEphemeralKey) {
+    throw new Error('No ephemeral key available for decryption');
+  }
+
+  const encryptedBytes = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
+  const decryptedBytes = decrypt(cachedEphemeralKey.secret, encryptedBytes);
+  const decryptedJson = new TextDecoder().decode(decryptedBytes);
+
+  console.log('🔓 Decrypted email data');
+  return JSON.parse(decryptedJson) as EmailData;
+}
+
+// Combined response with both inbox and sent
+export interface GetEmailsResult {
+  inbox: Email[];
+  sent: SentEmail[];
+  sendPubkey: string;
+  inboxNextOffset: number | null;
+  sentNextOffset: number | null;
+}
+
 // API functions
-export async function getEmails(limit = 50, offset = 0): Promise<Email[]> {
+
+// Get emails (both inbox and sent in one request)
+export async function getEmails(
+  inboxOffset = 0,
+  sentOffset = 0,
+  maxOutputSize?: number
+): Promise<GetEmailsResult> {
   // Generate ephemeral keypair for this request
-  // The private key never leaves the browser
-  const ephemeralKey = new PrivateKey();
-  const ephemeralPubkeyHex = ephemeralKey.publicKey.toHex();
+  cachedEphemeralKey = new PrivateKey();
+  const ephemeralPubkeyHex = cachedEphemeralKey.publicKey.toHex();
 
   console.log('🔐 Generated ephemeral pubkey:', ephemeralPubkeyHex);
 
   // Call WASI with ephemeral public key
-  const result = await callOutLayer('get_emails', {
+  const params: Record<string, any> = {
     ephemeral_pubkey: ephemeralPubkeyHex,
-    limit,
-    offset,
-  });
+  };
+
+  if (inboxOffset > 0) params.inbox_offset = inboxOffset;
+  if (sentOffset > 0) params.sent_offset = sentOffset;
+  if (maxOutputSize) params.max_output_size = maxOutputSize;
+
+  const result = await callOutLayer('get_emails', params);
 
   // Save send_pubkey for encrypting outgoing emails
   if (result.send_pubkey) {
@@ -193,15 +228,15 @@ export async function getEmails(limit = 50, offset = 0): Promise<Email[]> {
   }
 
   // Decrypt the response with ephemeral private key
-  const encryptedBase64 = result.encrypted_emails;
-  const encryptedBytes = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
+  const emailData = decryptEmailData(result.encrypted_data);
 
-  const decryptedBytes = decrypt(ephemeralKey.secret, encryptedBytes);
-  const decryptedJson = new TextDecoder().decode(decryptedBytes);
-
-  console.log('🔓 Decrypted emails');
-
-  return JSON.parse(decryptedJson) as Email[];
+  return {
+    inbox: emailData.inbox,
+    sent: emailData.sent,
+    sendPubkey: result.send_pubkey,
+    inboxNextOffset: result.inbox_next_offset ?? null,
+    sentNextOffset: result.sent_next_offset ?? null,
+  };
 }
 
 /// Get the cached send pubkey (or null if not loaded yet)
@@ -209,10 +244,27 @@ export function getSendPubkey(): string | null {
   return cachedSendPubkey;
 }
 
-export async function sendEmail(to: string, subject: string, body: string): Promise<void> {
+// Send email response with fresh data
+export interface SendEmailResult {
+  messageId: string | null;
+  inbox: Email[];
+  sent: SentEmail[];
+}
+
+export async function sendEmail(
+  to: string,
+  subject: string,
+  body: string,
+  attachments?: Attachment[],
+  maxOutputSize?: number
+): Promise<SendEmailResult> {
   if (!cachedSendPubkey) {
     throw new Error('Send pubkey not available. Please refresh emails first.');
   }
+
+  // Generate new ephemeral key for response decryption
+  cachedEphemeralKey = new PrivateKey();
+  const ephemeralPubkeyHex = cachedEphemeralKey.publicKey.toHex();
 
   // Convert hex pubkey to bytes
   const pubkeyBytes = Uint8Array.from(
@@ -227,56 +279,96 @@ export async function sendEmail(to: string, subject: string, body: string): Prom
   const encryptedSubjectB64 = btoa(String.fromCharCode(...encryptedSubject));
   const encryptedBodyB64 = btoa(String.fromCharCode(...encryptedBody));
 
-  await callOutLayer('send_email', {
+  const params: Record<string, any> = {
     to,
     encrypted_subject: encryptedSubjectB64,
     encrypted_body: encryptedBodyB64,
-  });
-}
-
-export async function deleteEmail(emailId: string): Promise<boolean> {
-  const result = await callOutLayer('delete_email', { email_id: emailId });
-  return result.deleted;
-}
-
-export async function getEmailCount(): Promise<number> {
-  const result = await callOutLayer('get_email_count', {});
-  return result.count;
-}
-
-export async function getSentEmails(limit = 50, offset = 0): Promise<SentEmail[]> {
-  // Generate ephemeral keypair for this request
-  const ephemeralKey = new PrivateKey();
-  const ephemeralPubkeyHex = ephemeralKey.publicKey.toHex();
-
-  console.log('🔐 Generated ephemeral pubkey for sent emails:', ephemeralPubkeyHex);
-
-  // Call WASI with ephemeral public key
-  const result = await callOutLayer('get_sent_emails', {
     ephemeral_pubkey: ephemeralPubkeyHex,
-    limit,
-    offset,
-  });
+  };
 
-  // Decrypt the response with ephemeral private key
-  const encryptedBase64 = result.encrypted_emails;
-  const encryptedBytes = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
+  // Encrypt attachments if present
+  if (attachments && attachments.length > 0) {
+    const attachmentsJson = JSON.stringify(attachments);
+    const encryptedAttachments = encrypt(pubkeyBytes, new TextEncoder().encode(attachmentsJson));
+    params.encrypted_attachments = btoa(String.fromCharCode(...encryptedAttachments));
+  }
 
-  const decryptedBytes = decrypt(ephemeralKey.secret, encryptedBytes);
-  const decryptedJson = new TextDecoder().decode(decryptedBytes);
+  if (maxOutputSize) params.max_output_size = maxOutputSize;
 
-  console.log('🔓 Decrypted sent emails');
+  const result = await callOutLayer('send_email', params);
 
-  return JSON.parse(decryptedJson) as SentEmail[];
+  // Decrypt fresh email data
+  const emailData = decryptEmailData(result.encrypted_data);
+
+  return {
+    messageId: result.message_id ?? null,
+    inbox: emailData.inbox,
+    sent: emailData.sent,
+  };
+}
+
+// Delete email response with fresh data
+export interface DeleteEmailResult {
+  deleted: boolean;
+  inbox: Email[];
+  sent: SentEmail[];
+}
+
+export async function deleteEmail(
+  emailId: string,
+  maxOutputSize?: number
+): Promise<DeleteEmailResult> {
+  // Generate new ephemeral key for response decryption
+  cachedEphemeralKey = new PrivateKey();
+  const ephemeralPubkeyHex = cachedEphemeralKey.publicKey.toHex();
+
+  const params: Record<string, any> = {
+    email_id: emailId,
+    ephemeral_pubkey: ephemeralPubkeyHex,
+  };
+
+  if (maxOutputSize) params.max_output_size = maxOutputSize;
+
+  const result = await callOutLayer('delete_email', params);
+
+  // Decrypt fresh email data
+  const emailData = decryptEmailData(result.encrypted_data);
+
+  return {
+    deleted: result.deleted,
+    inbox: emailData.inbox,
+    sent: emailData.sent,
+  };
+}
+
+export interface EmailCountResult {
+  inboxCount: number;
+  sentCount: number;
+}
+
+export async function getEmailCount(): Promise<EmailCountResult> {
+  const result = await callOutLayer('get_email_count', {});
+  return {
+    inboxCount: result.inbox_count,
+    sentCount: result.sent_count,
+  };
 }
 
 // Types
+export interface Attachment {
+  filename: string;
+  content_type: string;
+  data: string; // base64-encoded
+  size: number;
+}
+
 export interface Email {
   id: string;
   from: string;
   subject: string;
   body: string;
   received_at: string;
+  attachments?: Attachment[];
 }
 
 export interface SentEmail {
@@ -286,4 +378,11 @@ export interface SentEmail {
   body: string;
   tx_hash: string | null;
   sent_at: string;
+  attachments?: Attachment[];
+}
+
+// Combined data returned in encrypted payload
+export interface EmailData {
+  inbox: Email[];
+  sent: SentEmail[];
 }

@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// Default max output size: 1.5 MB
+pub const DEFAULT_MAX_OUTPUT_SIZE: usize = 1_500_000;
+
 /// Deserialize base64-encoded string as Vec<u8>
 fn deserialize_base64<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
@@ -18,50 +21,57 @@ where
 #[serde(tag = "action")]
 #[serde(rename_all = "snake_case")]
 pub enum Request {
-    /// Get emails for the signer (authenticated via NEAR transaction)
+    /// Get emails (inbox + sent) for the signer
     /// Response is encrypted with ephemeral_pubkey for client-side decryption
+    /// Returns as many emails as fit within max_output_size
     GetEmails {
         /// Client's ephemeral secp256k1 public key (hex, 33 bytes compressed)
-        /// WASI encrypts emails with this key, client decrypts with private key
         ephemeral_pubkey: String,
+        /// Max output size in bytes (default: 1.5MB)
         #[serde(default)]
-        limit: Option<i64>,
+        max_output_size: Option<usize>,
+        /// Offset for inbox emails
         #[serde(default)]
-        offset: Option<i64>,
+        inbox_offset: Option<i64>,
+        /// Offset for sent emails
+        #[serde(default)]
+        sent_offset: Option<i64>,
     },
 
     /// Send email from the signer's account
-    /// Subject and body are encrypted with the signer's public key (from get_emails response)
+    /// Returns fresh inbox/sent preview after sending
     SendEmail {
         to: String,
         /// Base64-encoded ECIES ciphertext of subject
         encrypted_subject: String,
         /// Base64-encoded ECIES ciphertext of body
         encrypted_body: String,
+        /// Base64-encoded ECIES ciphertext of attachments JSON (array of {filename, content_type, data_base64})
+        #[serde(default)]
+        encrypted_attachments: Option<String>,
+        /// Client's ephemeral public key for encrypting response
+        ephemeral_pubkey: String,
+        /// Max output size in bytes (default: 1.5MB)
+        #[serde(default)]
+        max_output_size: Option<usize>,
     },
 
     /// Delete an email (must belong to signer)
+    /// Returns fresh inbox/sent preview after deleting
     DeleteEmail {
         email_id: String,
+        /// Client's ephemeral public key for encrypting response
+        ephemeral_pubkey: String,
+        /// Max output size in bytes (default: 1.5MB)
+        #[serde(default)]
+        max_output_size: Option<usize>,
     },
 
     /// Get email count for the signer
     GetEmailCount,
 
     /// Get master public key (for SMTP server encryption)
-    /// No authentication required - public key is safe to share
     GetMasterPublicKey,
-
-    /// Get sent emails for the signer (authenticated via NEAR transaction)
-    /// Response is encrypted with ephemeral_pubkey for client-side decryption
-    GetSentEmails {
-        /// Client's ephemeral secp256k1 public key (hex, 33 bytes compressed)
-        ephemeral_pubkey: String,
-        #[serde(default)]
-        limit: Option<i64>,
-        #[serde(default)]
-        offset: Option<i64>,
-    },
 }
 
 // ==================== Response Types ====================
@@ -74,19 +84,21 @@ pub enum Response {
     DeleteEmail(DeleteEmailResponse),
     GetEmailCount(GetEmailCountResponse),
     GetMasterPublicKey(GetMasterPublicKeyResponse),
-    GetSentEmails(GetSentEmailsResponse),
 }
 
 #[derive(Debug, Serialize)]
 pub struct GetEmailsResponse {
     pub success: bool,
-    /// Base64-encoded ECIES ciphertext containing JSON array of emails
-    /// Encrypted with client's ephemeral public key
-    /// Client decrypts with ephemeral private key to get Vec<Email>
-    pub encrypted_emails: String,
-    /// Signer's public key (hex) for encrypting outgoing emails (subject, body)
-    /// Client must encrypt with this key before sending
+    /// Base64-encoded ECIES ciphertext containing EmailData JSON
+    pub encrypted_data: String,
+    /// Signer's public key (hex) for encrypting outgoing emails
     pub send_pubkey: String,
+    /// Next offset for inbox (if more emails available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inbox_next_offset: Option<i64>,
+    /// Next offset for sent (if more emails available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sent_next_offset: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,33 +106,29 @@ pub struct SendEmailResponse {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    /// Base64-encoded ECIES ciphertext containing EmailData JSON
+    pub encrypted_data: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct DeleteEmailResponse {
     pub success: bool,
     pub deleted: bool,
+    /// Base64-encoded ECIES ciphertext containing EmailData JSON
+    pub encrypted_data: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct GetEmailCountResponse {
     pub success: bool,
-    pub count: i64,
+    pub inbox_count: i64,
+    pub sent_count: i64,
 }
 
 #[derive(Debug, Serialize)]
 pub struct GetMasterPublicKeyResponse {
     pub success: bool,
-    /// Compressed secp256k1 public key in hex (33 bytes = 66 hex chars)
     pub public_key: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GetSentEmailsResponse {
-    pub success: bool,
-    /// Base64-encoded ECIES ciphertext containing JSON array of sent emails
-    /// Encrypted with client's ephemeral public key
-    pub encrypted_emails: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -129,7 +137,25 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-// ==================== Data Types ====================
+// ==================== Data Types (encrypted payload) ====================
+
+/// Combined email data returned in encrypted_data field
+#[derive(Debug, Serialize)]
+pub struct EmailData {
+    pub inbox: Vec<Email>,
+    pub sent: Vec<SentEmail>,
+}
+
+/// Attachment metadata with base64-encoded content
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    pub filename: String,
+    pub content_type: String,
+    /// Base64-encoded attachment data
+    pub data: String,
+    /// Size in bytes (for display)
+    pub size: usize,
+}
 
 #[derive(Debug, Serialize)]
 pub struct Email {
@@ -138,9 +164,10 @@ pub struct Email {
     pub subject: String,
     pub body: String,
     pub received_at: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
 }
 
-/// Sent email for frontend display
 #[derive(Debug, Serialize)]
 pub struct SentEmail {
     pub id: String,
@@ -149,9 +176,12 @@ pub struct SentEmail {
     pub body: String,
     pub tx_hash: Option<String>,
     pub sent_at: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
 }
 
-/// Encrypted email record from database
+// ==================== Database Types ====================
+
 #[derive(Debug, Deserialize)]
 pub struct EncryptedEmail {
     pub id: String,
@@ -161,19 +191,16 @@ pub struct EncryptedEmail {
     pub received_at: String,
 }
 
-/// Database API response for emails
 #[derive(Debug, Deserialize)]
 pub struct DbEmailsResponse {
     pub emails: Vec<EncryptedEmail>,
 }
 
-/// Database API response for count
 #[derive(Debug, Deserialize)]
 pub struct DbCountResponse {
     pub count: i64,
 }
 
-/// Database API generic response
 #[derive(Debug, Deserialize)]
 pub struct DbGenericResponse {
     pub success: bool,
@@ -181,7 +208,6 @@ pub struct DbGenericResponse {
     pub deleted: bool,
 }
 
-/// Encrypted sent email record from database
 #[derive(Debug, Deserialize)]
 pub struct EncryptedSentEmail {
     pub id: String,
@@ -192,13 +218,11 @@ pub struct EncryptedSentEmail {
     pub sent_at: String,
 }
 
-/// Database API response for sent emails
 #[derive(Debug, Deserialize)]
 pub struct DbSentEmailsResponse {
     pub emails: Vec<EncryptedSentEmail>,
 }
 
-/// Database API response for storing sent email
 #[derive(Debug, Deserialize)]
 pub struct DbStoreSentResponse {
     pub success: bool,
