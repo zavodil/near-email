@@ -174,25 +174,41 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
 
             // Check if internal email (@near.email)
             let internal_suffix = "@near.email";
+            // Get tx_hash if available (for blockchain calls)
+            let tx_hash = env::transaction_hash();
+
+            // Strip suffix from account_id for email address (zavodil.testnet -> zavodil@near.email)
+            let sender_local = account_id
+                .strip_suffix(&default_account_suffix)
+                .unwrap_or(&account_id);
+            let sender_email = format!("{}@near.email", sender_local);
+
+            // Add signature if configured (before quoted text if present)
+            let body_with_sig = if let Some(ref sig_template) = email_signature {
+                let signature = sig_template.replace("%account%", &account_id);
+                insert_signature_before_quote(&body, &signature)
+            } else {
+                body.clone()
+            };
+
+            // Build email content for sent folder (simple format)
+            let sent_email_content = format!(
+                "From: {}\r\nTo: {}\r\nSubject: {}\r\n\r\n{}",
+                sender_email, to, subject, body_with_sig
+            );
+
+            // Encrypt email for sender's sent folder
+            let encrypted_for_sender = crypto::encrypt_for_account(
+                &master_privkey,
+                &account_id,
+                sent_email_content.as_bytes(),
+            )?;
+
             if to.to_lowercase().ends_with(internal_suffix) {
                 // Internal email - encrypt and store directly
                 let recipient_account = extract_account_from_email(&to, internal_suffix, &default_account_suffix);
 
-                // Strip suffix from account_id for email address (zavodil.testnet -> zavodil@near.email)
-                let sender_local = account_id
-                    .strip_suffix(&default_account_suffix)
-                    .unwrap_or(&account_id);
-                let sender_email = format!("{}@near.email", sender_local);
-
-                // Add signature if configured
-                let body_with_sig = if let Some(ref sig_template) = email_signature {
-                    let signature = sig_template.replace("%account%", &account_id);
-                    format!("{}\r\n\r\n--\r\n{}", body, signature)
-                } else {
-                    body.clone()
-                };
-
-                // Build email content (simple format)
+                // Build email content for recipient (same as above)
                 let email_content = format!(
                     "From: {}\r\nTo: {}\r\nSubject: {}\r\n\r\n{}",
                     sender_email, to, subject, body_with_sig
@@ -205,13 +221,22 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                     email_content.as_bytes(),
                 )?;
 
-                // Store in database
+                // Store in recipient's inbox
                 let email_id = db::store_internal_email(
                     &get_db_api_url()?,
                     &recipient_account,
                     &sender_email,
                     &encrypted,
                 )?;
+
+                // Store in sender's sent folder
+                let _ = db::store_sent_email(
+                    &get_db_api_url()?,
+                    &account_id,
+                    &to,
+                    &encrypted_for_sender,
+                    tx_hash.as_deref(),
+                );
 
                 Ok(Response::SendEmail(SendEmailResponse {
                     success: true,
@@ -220,6 +245,15 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             } else {
                 // External email - send via SMTP relay
                 db::send_email(&get_db_api_url()?, &account_id, &to, &subject, &body)?;
+
+                // Store in sender's sent folder
+                let _ = db::store_sent_email(
+                    &get_db_api_url()?,
+                    &account_id,
+                    &to,
+                    &encrypted_for_sender,
+                    tx_hash.as_deref(),
+                );
 
                 Ok(Response::SendEmail(SendEmailResponse {
                     success: true,
@@ -264,6 +298,66 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             Ok(Response::GetMasterPublicKey(GetMasterPublicKeyResponse {
                 success: true,
                 public_key: pubkey_hex,
+            }))
+        }
+
+        Request::GetSentEmails {
+            ephemeral_pubkey,
+            limit,
+            offset,
+        } => {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+
+            // Get authenticated signer
+            let account_id = get_signer()?;
+
+            // Parse client's ephemeral public key (hex -> bytes)
+            let ephemeral_pubkey_bytes = hex::decode(&ephemeral_pubkey)
+                .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?;
+
+            // Derive user's private key for decryption
+            let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
+
+            // Fetch encrypted sent emails from database
+            let encrypted_emails = db::fetch_sent_emails(
+                &get_db_api_url()?,
+                &account_id,
+                limit.unwrap_or(50),
+                offset.unwrap_or(0),
+            )?;
+
+            // Decrypt sent emails
+            let mut emails = Vec::new();
+            for enc_email in encrypted_emails {
+                match crypto::decrypt_email(&user_privkey, &enc_email.encrypted_data) {
+                    Ok(decrypted) => {
+                        // Parse email content
+                        let parsed = parse_email(&decrypted)?;
+                        emails.push(SentEmail {
+                            id: enc_email.id,
+                            to: enc_email.recipient_email,
+                            subject: parsed.subject,
+                            body: parsed.body,
+                            tx_hash: enc_email.tx_hash,
+                            sent_at: enc_email.sent_at,
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to decrypt sent email {}: {}", enc_email.id, e);
+                    }
+                }
+            }
+
+            // Serialize emails to JSON
+            let emails_json = serde_json::to_vec(&emails)?;
+
+            // Re-encrypt with client's ephemeral public key
+            let encrypted_response = ecies::encrypt(&ephemeral_pubkey_bytes, &emails_json)
+                .map_err(|e| format!("Failed to encrypt response: {}", e))?;
+
+            Ok(Response::GetSentEmails(GetSentEmailsResponse {
+                success: true,
+                encrypted_emails: STANDARD.encode(&encrypted_response),
             }))
         }
     }
@@ -359,5 +453,44 @@ fn extract_account_from_email(email: &str, email_suffix: &str, default_account_s
         local_part
     } else {
         format!("{}{}", local_part, default_account_suffix)
+    }
+}
+
+/// Insert signature before quoted text markers, or at the end if no quote found
+fn insert_signature_before_quote(body: &str, signature: &str) -> String {
+    // Common quote markers
+    let quote_markers = [
+        "-------- Original Message --------",
+        "---------- Forwarded message ---------",
+        "On ", // "On Mon, Jan 23, 2026 at..." - but need to check it looks like a quote
+    ];
+
+    // Find earliest quote marker position
+    let mut earliest_pos: Option<usize> = None;
+
+    for marker in &quote_markers[..2] {
+        // Check exact markers first
+        if let Some(pos) = body.find(marker) {
+            earliest_pos = Some(earliest_pos.map_or(pos, |e| e.min(pos)));
+        }
+    }
+
+    // Check for "On ... wrote:" pattern (common in Gmail replies)
+    if let Some(on_pos) = body.find("\nOn ") {
+        // Check if this line ends with "wrote:" somewhere after
+        let after_on = &body[on_pos..];
+        if after_on.contains("wrote:") || after_on.contains("написал:") {
+            earliest_pos = Some(earliest_pos.map_or(on_pos, |e| e.min(on_pos)));
+        }
+    }
+
+    if let Some(pos) = earliest_pos {
+        // Insert signature before the quoted text
+        let (before, after) = body.split_at(pos);
+        let before_trimmed = before.trim_end();
+        format!("{}\r\n\r\n--\r\n{}\r\n\r\n{}", before_trimmed, signature, after)
+    } else {
+        // No quote found, append at the end
+        format!("{}\r\n\r\n--\r\n{}", body, signature)
     }
 }

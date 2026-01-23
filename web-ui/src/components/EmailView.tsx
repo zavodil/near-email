@@ -88,7 +88,8 @@ export default function EmailView({ email, onDelete, onReply }: EmailViewProps) 
 function formatBody(body: string): string {
   // Basic formatting: convert newlines to <br> if not already HTML
   if (!body.includes('<')) {
-    return body.replace(/\n/g, '<br>');
+    // Handle both \r\n (CRLF) and \n (LF) newlines
+    return body.replace(/\r\n/g, '<br>').replace(/\n/g, '<br>');
   }
   return body;
 }

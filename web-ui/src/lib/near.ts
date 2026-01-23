@@ -244,6 +244,32 @@ export async function getEmailCount(): Promise<number> {
   return result.count;
 }
 
+export async function getSentEmails(limit = 50, offset = 0): Promise<SentEmail[]> {
+  // Generate ephemeral keypair for this request
+  const ephemeralKey = new PrivateKey();
+  const ephemeralPubkeyHex = ephemeralKey.publicKey.toHex();
+
+  console.log('🔐 Generated ephemeral pubkey for sent emails:', ephemeralPubkeyHex);
+
+  // Call WASI with ephemeral public key
+  const result = await callOutLayer('get_sent_emails', {
+    ephemeral_pubkey: ephemeralPubkeyHex,
+    limit,
+    offset,
+  });
+
+  // Decrypt the response with ephemeral private key
+  const encryptedBase64 = result.encrypted_emails;
+  const encryptedBytes = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
+
+  const decryptedBytes = decrypt(ephemeralKey.secret, encryptedBytes);
+  const decryptedJson = new TextDecoder().decode(decryptedBytes);
+
+  console.log('🔓 Decrypted sent emails');
+
+  return JSON.parse(decryptedJson) as SentEmail[];
+}
+
 // Types
 export interface Email {
   id: string;
@@ -251,4 +277,13 @@ export interface Email {
   subject: string;
   body: string;
   received_at: string;
+}
+
+export interface SentEmail {
+  id: string;
+  to: string;
+  subject: string;
+  body: string;
+  tx_hash: string | null;
+  sent_at: string;
 }

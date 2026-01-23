@@ -138,6 +138,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/emails/:id", delete(delete_email))
         .route("/send", post(send_email))
         .route("/internal-store", post(store_internal_email))
+        .route("/sent-emails", get(get_sent_emails))
+        .route("/store-sent", post(store_sent_email))
         .route("/health", get(health))
         .layer(cors)
         .with_state(Arc::new(state));
@@ -230,6 +232,55 @@ struct StoreInternalEmailBody {
 
 #[derive(Debug, Serialize)]
 struct StoreInternalResponse {
+    success: bool,
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetSentEmailsQuery {
+    sender: String,
+    #[serde(default = "default_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct SentEmailRow {
+    id: Uuid,
+    recipient_email: String,
+    encrypted_data: Vec<u8>,
+    tx_hash: Option<String>,
+    sent_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct SentEmailRecord {
+    id: String,
+    recipient_email: String,
+    #[serde(with = "base64_serde")]
+    encrypted_data: Vec<u8>,
+    tx_hash: Option<String>,
+    sent_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SentEmailsResponse {
+    emails: Vec<SentEmailRecord>,
+}
+
+/// Request to store a sent email (already encrypted by WASI module)
+#[derive(Debug, Deserialize)]
+struct StoreSentEmailBody {
+    sender: String,
+    recipient_email: String,
+    #[serde(with = "base64_serde_de")]
+    encrypted_data: Vec<u8>,
+    tx_hash: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct StoreSentResponse {
     success: bool,
     id: String,
 }
@@ -398,10 +449,10 @@ async fn send_email(
         state.email_domain
     );
 
-    // Build email body with optional signature
+    // Build email body with optional signature (before quoted text if present)
     let email_body = if let Some(ref sig_template) = state.email_signature {
         let signature = sig_template.replace("%account%", &body.from_account);
-        format!("{}\n\n--\n{}", body.body, signature)
+        insert_signature_before_quote(&body.body, &signature)
     } else {
         body.body.clone()
     };
@@ -657,4 +708,114 @@ async fn store_internal_email(
         success: true,
         id: id.to_string(),
     }))
+}
+
+/// Get sent emails for a sender
+async fn get_sent_emails(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<GetSentEmailsQuery>,
+) -> Result<Json<SentEmailsResponse>, StatusCode> {
+    let rows: Vec<SentEmailRow> = sqlx::query_as(
+        r#"
+        SELECT id, recipient_email, encrypted_data, tx_hash, sent_at
+        FROM sent_emails
+        WHERE sender = $1
+        ORDER BY sent_at DESC
+        LIMIT $2 OFFSET $3
+        "#,
+    )
+    .bind(&query.sender)
+    .bind(query.limit)
+    .bind(query.offset)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to get sent emails: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let emails = rows
+        .into_iter()
+        .map(|row| SentEmailRecord {
+            id: row.id.to_string(),
+            recipient_email: row.recipient_email,
+            encrypted_data: row.encrypted_data,
+            tx_hash: row.tx_hash,
+            sent_at: row.sent_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(SentEmailsResponse { emails }))
+}
+
+/// Store a sent email (already encrypted by WASI module)
+async fn store_sent_email(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<StoreSentEmailBody>,
+) -> Result<Json<StoreSentResponse>, StatusCode> {
+    let id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO sent_emails (id, sender, recipient_email, encrypted_data, tx_hash, sent_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        "#,
+    )
+    .bind(id)
+    .bind(&body.sender)
+    .bind(&body.recipient_email)
+    .bind(&body.encrypted_data)
+    .bind(&body.tx_hash)
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to store sent email: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    info!(
+        "📤 Sent email {} stored: from={}, to={}, encrypted={}B, tx_hash={:?}",
+        id, body.sender, body.recipient_email, body.encrypted_data.len(), body.tx_hash
+    );
+
+    Ok(Json(StoreSentResponse {
+        success: true,
+        id: id.to_string(),
+    }))
+}
+
+/// Insert signature before quoted text markers, or at the end if no quote found
+fn insert_signature_before_quote(body: &str, signature: &str) -> String {
+    // Common quote markers
+    let quote_markers = [
+        "-------- Original Message --------",
+        "---------- Forwarded message ---------",
+    ];
+
+    // Find earliest quote marker position
+    let mut earliest_pos: Option<usize> = None;
+
+    for marker in &quote_markers {
+        if let Some(pos) = body.find(marker) {
+            earliest_pos = Some(earliest_pos.map_or(pos, |e| e.min(pos)));
+        }
+    }
+
+    // Check for "On ... wrote:" pattern (common in Gmail replies)
+    if let Some(on_pos) = body.find("\nOn ") {
+        let after_on = &body[on_pos..];
+        if after_on.contains("wrote:") || after_on.contains("написал:") {
+            earliest_pos = Some(earliest_pos.map_or(on_pos, |e| e.min(on_pos)));
+        }
+    }
+
+    if let Some(pos) = earliest_pos {
+        // Insert signature before the quoted text
+        let (before, after) = body.split_at(pos);
+        let before_trimmed = before.trim_end();
+        format!("{}\n\n--\n{}\n\n{}", before_trimmed, signature, after)
+    } else {
+        // No quote found, append at the end
+        format!("{}\n\n--\n{}", body, signature)
+    }
 }

@@ -157,3 +157,67 @@ pub fn store_internal_email(
 
     Ok(id)
 }
+
+/// Fetch encrypted sent emails for an account
+pub fn fetch_sent_emails(
+    api_url: &str,
+    account_id: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<EncryptedSentEmail>, Box<dyn std::error::Error>> {
+    let url = format!(
+        "{}/sent-emails?sender={}&limit={}&offset={}",
+        api_url, account_id, limit, offset
+    );
+
+    let response = Client::new()
+        .get(&url)
+        .connect_timeout(TIMEOUT)
+        .send()?;
+
+    if response.status() != 200 {
+        return Err(format!("Database API error: {}", response.status()).into());
+    }
+
+    let body = response.body()?;
+    let result: DbSentEmailsResponse = serde_json::from_slice(&body)?;
+
+    Ok(result.emails)
+}
+
+/// Store sent email (already encrypted)
+pub fn store_sent_email(
+    api_url: &str,
+    sender: &str,
+    recipient_email: &str,
+    encrypted_data: &[u8],
+    tx_hash: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let url = format!("{}/store-sent", api_url);
+
+    let payload = serde_json::json!({
+        "sender": sender,
+        "recipient_email": recipient_email,
+        "encrypted_data": STANDARD.encode(encrypted_data),
+        "tx_hash": tx_hash,
+    });
+
+    let body_data = serde_json::to_vec(&payload)?;
+    let response = Client::new()
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(&body_data)
+        .connect_timeout(TIMEOUT)
+        .send()?;
+
+    if response.status() != 200 {
+        return Err(format!("Store sent email failed: {}", response.status()).into());
+    }
+
+    let body = response.body()?;
+    let result: DbStoreSentResponse = serde_json::from_slice(&body)?;
+
+    Ok(result.id)
+}

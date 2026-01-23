@@ -51,6 +51,17 @@ pub enum Request {
     /// Get master public key (for SMTP server encryption)
     /// No authentication required - public key is safe to share
     GetMasterPublicKey,
+
+    /// Get sent emails for the signer (authenticated via NEAR transaction)
+    /// Response is encrypted with ephemeral_pubkey for client-side decryption
+    GetSentEmails {
+        /// Client's ephemeral secp256k1 public key (hex, 33 bytes compressed)
+        ephemeral_pubkey: String,
+        #[serde(default)]
+        limit: Option<i64>,
+        #[serde(default)]
+        offset: Option<i64>,
+    },
 }
 
 // ==================== Response Types ====================
@@ -63,6 +74,7 @@ pub enum Response {
     DeleteEmail(DeleteEmailResponse),
     GetEmailCount(GetEmailCountResponse),
     GetMasterPublicKey(GetMasterPublicKeyResponse),
+    GetSentEmails(GetSentEmailsResponse),
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +116,14 @@ pub struct GetMasterPublicKeyResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct GetSentEmailsResponse {
+    pub success: bool,
+    /// Base64-encoded ECIES ciphertext containing JSON array of sent emails
+    /// Encrypted with client's ephemeral public key
+    pub encrypted_emails: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub success: bool,
     pub error: String,
@@ -118,6 +138,17 @@ pub struct Email {
     pub subject: String,
     pub body: String,
     pub received_at: String,
+}
+
+/// Sent email for frontend display
+#[derive(Debug, Serialize)]
+pub struct SentEmail {
+    pub id: String,
+    pub to: String,
+    pub subject: String,
+    pub body: String,
+    pub tx_hash: Option<String>,
+    pub sent_at: String,
 }
 
 /// Encrypted email record from database
@@ -148,4 +179,28 @@ pub struct DbGenericResponse {
     pub success: bool,
     #[serde(default)]
     pub deleted: bool,
+}
+
+/// Encrypted sent email record from database
+#[derive(Debug, Deserialize)]
+pub struct EncryptedSentEmail {
+    pub id: String,
+    pub recipient_email: String,
+    #[serde(deserialize_with = "deserialize_base64")]
+    pub encrypted_data: Vec<u8>,
+    pub tx_hash: Option<String>,
+    pub sent_at: String,
+}
+
+/// Database API response for sent emails
+#[derive(Debug, Deserialize)]
+pub struct DbSentEmailsResponse {
+    pub emails: Vec<EncryptedSentEmail>,
+}
+
+/// Database API response for storing sent email
+#[derive(Debug, Deserialize)]
+pub struct DbStoreSentResponse {
+    pub success: bool,
+    pub id: String,
 }

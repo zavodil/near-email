@@ -36,6 +36,7 @@ export default function ComposeModal({
 
     try {
       await sendEmail(to, subject, body);
+      alert('Email sent successfully!');
       onSent();
     } catch (err: any) {
       setError(err.message);
