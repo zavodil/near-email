@@ -29,7 +29,14 @@ function encryptEcdh(recipientPubkey: Uint8Array, data: Uint8Array): Uint8Array 
   // ECDH: shared_secret = ephemeral_priv * recipient_pub
   const sharedPoint = secp256k1.getSharedSecret(ephemeralPrivkey, recipientPubkey, true);
   // Derive key: SHA256(shared_secret) - skip first byte (prefix) for compatibility
-  const key = sha256(sharedPoint.slice(1));
+  const sharedX = sharedPoint.slice(1);
+  const key = sha256(sharedX);
+
+  // Debug: output first 8 bytes for comparison with Rust backend
+  console.log('[DEBUG] encryptEcdh: recipient_pubkey first 8:', Array.from(recipientPubkey.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+  console.log('[DEBUG] encryptEcdh: ephemeral_pubkey first 8:', Array.from(ephemeralPubkey.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+  console.log('[DEBUG] encryptEcdh: shared_x first 8:', Array.from(sharedX.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+  console.log('[DEBUG] encryptEcdh: derived key first 8:', Array.from(key.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
   // Generate random nonce
   const nonce = randomBytes(12);
