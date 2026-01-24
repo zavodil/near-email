@@ -61,6 +61,12 @@ services:
       DKIM_SELECTOR: ${DKIM_SELECTOR:-mail}
       # Email signature (use %account% for sender's NEAR account)
       EMAIL_SIGNATURE: ${EMAIL_SIGNATURE:-Sent by %account% via NEAR OutLayer}
+      # SMTP relay (optional - set SMTP_RELAY_HOST to enable)
+      SMTP_RELAY_HOST: ${SMTP_RELAY_HOST:-}
+      SMTP_RELAY_PORT: ${SMTP_RELAY_PORT:-587}
+      SMTP_RELAY_USER: ${SMTP_RELAY_USER:-resend}
+      SMTP_RELAY_PASSWORD: ${SMTP_RELAY_PASSWORD:-}
+      SMTP_RELAY_ENABLED: ${SMTP_RELAY_ENABLED:-true}
     # ports not needed with network_mode: host (8080 exposed directly)
     depends_on:
       postgres:

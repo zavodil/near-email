@@ -21,6 +21,7 @@ use lettre::{
         Attachment as LettreAttachment,
     },
     transport::smtp::{
+        authentication::Credentials,
         client::{Tls, TlsParameters},
         extension::ClientId,
     },
@@ -48,6 +49,18 @@ struct DkimConfig {
     selector: String,
 }
 
+/// SMTP relay configuration for sending via external provider
+struct SmtpRelayConfig {
+    /// SMTP host (e.g., "smtp.resend.com")
+    host: String,
+    /// SMTP port (e.g., 587 for STARTTLS, 465 for SSL)
+    port: u16,
+    /// Username for authentication
+    username: String,
+    /// Password/API key for authentication
+    password: String,
+}
+
 struct AppState {
     db: PgPool,
     email_domain: String,
@@ -58,6 +71,8 @@ struct AppState {
     /// Email signature template (use %account% placeholder for sender's NEAR account)
     /// Example: "Sent by %account% via NEAR OutLayer"
     email_signature: Option<String>,
+    /// SMTP relay config - if set, use relay instead of direct MX delivery
+    smtp_relay: Option<SmtpRelayConfig>,
 }
 
 #[tokio::main]
@@ -129,9 +144,37 @@ async fn main() -> anyhow::Result<()> {
         info!("Email signature enabled: {}", sig);
     }
 
+    // SMTP relay configuration (optional - if not set, uses direct MX delivery)
+    // Set SMTP_RELAY_HOST to configure, SMTP_RELAY_ENABLED=false to disable
+    let relay_enabled = env::var("SMTP_RELAY_ENABLED")
+        .map(|v| v.to_lowercase() != "false" && v != "0")
+        .unwrap_or(true); // enabled by default if configured
+
+    let smtp_relay = match env::var("SMTP_RELAY_HOST") {
+        Ok(host) if !host.is_empty() && relay_enabled => {
+            let port: u16 = env::var("SMTP_RELAY_PORT")
+                .unwrap_or_else(|_| "587".to_string())
+                .parse()
+                .expect("SMTP_RELAY_PORT must be a valid port");
+            let username = env::var("SMTP_RELAY_USER").unwrap_or_else(|_| "resend".to_string());
+            let password = env::var("SMTP_RELAY_PASSWORD").expect("SMTP_RELAY_PASSWORD must be set when SMTP_RELAY_HOST is set");
+
+            info!("SMTP relay enabled: {}:{} (user: {})", host, port, username);
+            Some(SmtpRelayConfig { host, port, username, password })
+        }
+        Ok(host) if !host.is_empty() && !relay_enabled => {
+            info!("SMTP relay configured but disabled (SMTP_RELAY_ENABLED=false), using direct MX delivery");
+            None
+        }
+        _ => {
+            info!("SMTP relay not configured, using direct MX delivery");
+            None
+        }
+    };
+
     info!("Email domain: {}, account suffix: {}", email_domain, account_suffix);
 
-    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature };
+    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -576,57 +619,66 @@ async fn send_email(
             })?
     };
 
-    // Lookup MX records
-    let mx_records = state.resolver
-        .mx_lookup(to_domain)
-        .await
-        .map_err(|e| {
-            error!("MX lookup failed for {}: {}", to_domain, e);
-            StatusCode::BAD_GATEWAY
-        })?;
+    // Send via relay or direct MX
+    let send_result = if let Some(relay) = &state.smtp_relay {
+        // Use SMTP relay (e.g., Resend, SendGrid)
+        info!("Sending via SMTP relay {}:{}", relay.host, relay.port);
+        send_via_relay(relay, &email).await
+    } else {
+        // Direct MX delivery
+        // Lookup MX records
+        let mx_records = state.resolver
+            .mx_lookup(to_domain)
+            .await
+            .map_err(|e| {
+                error!("MX lookup failed for {}: {}", to_domain, e);
+                StatusCode::BAD_GATEWAY
+            })?;
 
-    // Get the highest priority MX server (lowest preference number)
-    let mx_host = mx_records
-        .iter()
-        .min_by_key(|mx| mx.preference())
-        .map(|mx| mx.exchange().to_string().trim_end_matches('.').to_string())
-        .ok_or_else(|| {
-            error!("No MX records found for {}", to_domain);
-            StatusCode::BAD_GATEWAY
-        })?;
+        // Get the highest priority MX server (lowest preference number)
+        let mx_host = mx_records
+            .iter()
+            .min_by_key(|mx| mx.preference())
+            .map(|mx| mx.exchange().to_string().trim_end_matches('.').to_string())
+            .ok_or_else(|| {
+                error!("No MX records found for {}", to_domain);
+                StatusCode::BAD_GATEWAY
+            })?;
 
-    info!("Using MX server {} for {}", mx_host, to_domain);
+        info!("Using MX server {} for {}", mx_host, to_domain);
 
-    // Sign with DKIM and send, or send unsigned
-    let send_result = if let Some(dkim) = &state.dkim {
-        match sign_email_dkim(&email, dkim) {
-            Ok(signed_bytes) => {
-                info!("Email DKIM signed successfully");
-                // Create envelope for raw sending
-                match lettre::address::Envelope::new(
-                    Some(from_mailbox.email.clone()),
-                    vec![to_mailbox.email.clone()],
-                ) {
-                    Ok(envelope) => send_via_smtp_raw(&state.resolver, &mx_host, &state.email_domain, &envelope, &signed_bytes).await,
-                    Err(e) => Err(format!("Failed to create envelope: {}", e)),
+        // Sign with DKIM and send, or send unsigned
+        if let Some(dkim) = &state.dkim {
+            match sign_email_dkim(&email, dkim) {
+                Ok(signed_bytes) => {
+                    info!("Email DKIM signed successfully");
+                    // Create envelope for raw sending
+                    match lettre::address::Envelope::new(
+                        Some(from_mailbox.email.clone()),
+                        vec![to_mailbox.email.clone()],
+                    ) {
+                        Ok(envelope) => send_via_smtp_raw(&state.resolver, &mx_host, &state.email_domain, &envelope, &signed_bytes).await,
+                        Err(e) => Err(format!("Failed to create envelope: {}", e)),
+                    }
+                }
+                Err(e) => {
+                    warn!("DKIM signing failed, sending unsigned: {}", e);
+                    send_via_smtp(&state.resolver, &mx_host, &state.email_domain, &email).await
                 }
             }
-            Err(e) => {
-                warn!("DKIM signing failed, sending unsigned: {}", e);
-                send_via_smtp(&state.resolver, &mx_host, &state.email_domain, &email).await
-            }
+        } else {
+            send_via_smtp(&state.resolver, &mx_host, &state.email_domain, &email).await
         }
-    } else {
-        send_via_smtp(&state.resolver, &mx_host, &state.email_domain, &email).await
     };
 
+    let via = state.smtp_relay.as_ref().map(|r| r.host.as_str()).unwrap_or(to_domain);
     match send_result {
         Ok(_) => {
-            info!("Email sent successfully to {} via {}", body.to, mx_host);
+            info!("Email sent successfully to {} via {}", body.to, via);
             Ok(Json(SendResponse { success: true, error: None }))
         }
         Err(e) => {
-            error!("Failed to send email to {} via {}: {}", body.to, mx_host, e);
+            error!("Failed to send email to {} via {}: {}", body.to, via, e);
             Ok(Json(SendResponse {
                 success: false,
                 error: Some(format!("SMTP error: {}", e))
@@ -776,6 +828,38 @@ async fn send_via_smtp_raw(
         .send_raw(envelope, raw_email)
         .await
         .map_err(|e| format!("SMTP send error: {}", e))?;
+
+    Ok(())
+}
+
+/// Send email via SMTP relay (Resend, SendGrid, etc.)
+async fn send_via_relay(
+    relay: &SmtpRelayConfig,
+    email: &Message,
+) -> Result<(), String> {
+    let creds = Credentials::new(relay.username.clone(), relay.password.clone());
+
+    // Use STARTTLS on port 587, or implicit TLS on port 465
+    let mailer = if relay.port == 465 {
+        AsyncSmtpTransport::<Tokio1Executor>::relay(&relay.host)
+            .map_err(|e| format!("Failed to create relay transport: {}", e))?
+            .credentials(creds)
+            .port(relay.port)
+            .timeout(Some(std::time::Duration::from_secs(30)))
+            .build()
+    } else {
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&relay.host)
+            .map_err(|e| format!("Failed to create relay transport: {}", e))?
+            .credentials(creds)
+            .port(relay.port)
+            .timeout(Some(std::time::Duration::from_secs(30)))
+            .build()
+    };
+
+    mailer
+        .send(email.clone())
+        .await
+        .map_err(|e| format!("SMTP relay error: {}", e))?;
 
     Ok(())
 }
