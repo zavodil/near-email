@@ -46,6 +46,8 @@ function encryptEcdh(recipientPubkey: Uint8Array, data: Uint8Array): Uint8Array 
   console.log('[DEBUG] encryptEcdh: derived key first 8:', Array.from(key.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
   console.log('[DEBUG] encryptEcdh: nonce:', Array.from(nonce).map(b => b.toString(16).padStart(2, '0')).join(' '));
   console.log('[DEBUG] encryptEcdh: ciphertext first 16:', Array.from(ciphertext.slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+  console.log('[DEBUG] encryptEcdh: ciphertext last 16 (tag):', Array.from(ciphertext.slice(-16)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+  console.log('[DEBUG] encryptEcdh: ciphertext total len:', ciphertext.length);
 
   // Build output: EC01 || ephemeral_pubkey (33) || nonce (12) || ciphertext
   const output = new Uint8Array(4 + 33 + 12 + ciphertext.length);
@@ -277,8 +279,8 @@ async function callOutLayerHttps(action: string, params: Record<string, any>): P
   const requestBody: Record<string, any> = {
     input: inputData,
     resource_limits: {
-      max_instructions: 500000000,  // 500M - more headroom for HTTPS
-      max_memory_mb: 256,           // 256MB - needed for larger outputs
+      max_instructions: 2000000000,  // 2B - needed for large attachments decryption
+      max_memory_mb: 512,           // 512MB - needed for larger outputs
       max_execution_seconds: 120,   // 2 min - more time for big data
     },
   };
@@ -373,8 +375,8 @@ export async function callOutLayer(action: string, params: Record<string, any>):
     },
     input_data: inputData,
     resource_limits: {
-      max_instructions: 500000000, // 500M - needed for large attachments
-      max_memory_mb: 256,          // 256MB - needed for ECIES encryption of attachments
+      max_instructions: 2000000000, // 2B - needed for large attachments decryption
+      max_memory_mb: 512,          // 512MB - needed for large attachments
       max_execution_seconds: 120,  // 2 min for large data
     },
     response_format: 'Json',
