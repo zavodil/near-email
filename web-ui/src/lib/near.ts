@@ -32,18 +32,20 @@ function encryptEcdh(recipientPubkey: Uint8Array, data: Uint8Array): Uint8Array 
   const sharedX = sharedPoint.slice(1);
   const key = sha256(sharedX);
 
-  // Debug: output first 8 bytes for comparison with Rust backend
-  console.log('[DEBUG] encryptEcdh: recipient_pubkey first 8:', Array.from(recipientPubkey.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
-  console.log('[DEBUG] encryptEcdh: ephemeral_pubkey first 8:', Array.from(ephemeralPubkey.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
-  console.log('[DEBUG] encryptEcdh: shared_x first 8:', Array.from(sharedX.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
-  console.log('[DEBUG] encryptEcdh: derived key first 8:', Array.from(key.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
-
   // Generate random nonce
   const nonce = randomBytes(12);
 
   // Encrypt with ChaCha20-Poly1305
   const cipher = chacha20poly1305(key, nonce);
   const ciphertext = cipher.encrypt(data);
+
+  // Debug: output bytes for comparison with Rust backend
+  console.log('[DEBUG] encryptEcdh: recipient_pubkey first 8:', Array.from(recipientPubkey.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+  console.log('[DEBUG] encryptEcdh: ephemeral_pubkey first 8:', Array.from(ephemeralPubkey.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+  console.log('[DEBUG] encryptEcdh: shared_x first 8:', Array.from(sharedX.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+  console.log('[DEBUG] encryptEcdh: derived key first 8:', Array.from(key.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+  console.log('[DEBUG] encryptEcdh: nonce:', Array.from(nonce).map(b => b.toString(16).padStart(2, '0')).join(' '));
+  console.log('[DEBUG] encryptEcdh: ciphertext first 16:', Array.from(ciphertext.slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
   // Build output: EC01 || ephemeral_pubkey (33) || nonce (12) || ciphertext
   const output = new Uint8Array(4 + 33 + 12 + ciphertext.length);

@@ -519,13 +519,8 @@ async fn send_email(
         state.email_domain
     );
 
-    // Build email body with optional signature (before quoted text if present)
-    let email_body = if let Some(ref sig_template) = state.email_signature {
-        let signature = sig_template.replace("%account%", &body.from_account);
-        insert_signature_before_quote(&body.body, &signature)
-    } else {
-        body.body.clone()
-    };
+    // Use body as-is - signature is added by WASM before calling this API
+    let email_body = body.body.clone();
 
     // Build email message (with or without attachments)
     let email = if body.attachments.is_empty() {
