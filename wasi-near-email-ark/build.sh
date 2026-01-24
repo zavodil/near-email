@@ -27,6 +27,10 @@ SIZE_KB=$(echo "scale=0; $SIZE / 1024" | bc)
 echo "WASM module: $WASM_FILE"
 echo "Size: ${SIZE_KB} KB (${SIZE_MB} MB)"
 
+# Show SHA256 hash (for FastFS/contract)
+HASH=$(shasum -a 256 "$WASM_FILE" | cut -d' ' -f1)
+echo "SHA256: $HASH"
+
 # Warning if over 2MB
 if [ "$SIZE" -gt "$MAX_SIZE" ]; then
     echo ""

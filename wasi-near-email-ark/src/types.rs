@@ -235,6 +235,7 @@ pub struct DbCountResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct DbGenericResponse {
     pub success: bool,
     #[serde(default)]
@@ -257,18 +258,21 @@ pub struct DbSentEmailsResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct DbStoreSentResponse {
     pub success: bool,
     pub id: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct DbStoreAttachmentResponse {
     pub success: bool,
     pub id: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct DbAttachmentResponse {
     pub id: String,
     pub email_id: String,

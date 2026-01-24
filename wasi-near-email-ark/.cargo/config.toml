@@ -1,0 +1,4 @@
+[target.wasm32-wasip2]
+# Increase stack size to 32MB (default is ~1MB)
+# This helps with large ECIES decryption operations on multi-MB files
+rustflags = ["-C", "link-args=-z stack-size=33554432"]

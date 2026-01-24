@@ -6,6 +6,47 @@ import { setupMeteorWallet } from '@near-wallet-selector/meteor-wallet';
 import type { WalletSelector, AccountState } from '@near-wallet-selector/core';
 import { actionCreators } from '@near-js/transactions';
 import { PrivateKey, decrypt, encrypt } from 'eciesjs';
+import { chacha20poly1305 } from '@noble/ciphers/chacha';
+import { randomBytes } from '@noble/ciphers/webcrypto';
+
+// Hybrid encryption magic bytes (must match WASM)
+const HYBRID_MAGIC = new Uint8Array([0x48, 0x45, 0x30, 0x31]); // "HE01"
+
+/**
+ * Encrypt data using hybrid encryption (ECIES key + ChaCha20-Poly1305 data)
+ *
+ * Format: HE01 || key_len (2 bytes LE) || ECIES(symmetric_key) || nonce (12 bytes) || ciphertext+tag
+ *
+ * This is much faster than pure ECIES for large data and works reliably in WASM.
+ */
+function encryptHybrid(pubkeyBytes: Uint8Array, data: Uint8Array): Uint8Array {
+  // Generate random 32-byte symmetric key
+  const symmetricKey = randomBytes(32);
+
+  // Generate random 12-byte nonce
+  const nonce = randomBytes(12);
+
+  // Encrypt symmetric key with ECIES (small data - always works)
+  const encryptedKey = encrypt(pubkeyBytes, symmetricKey);
+
+  // Encrypt data with ChaCha20-Poly1305
+  const cipher = chacha20poly1305(symmetricKey, nonce);
+  const ciphertext = cipher.encrypt(data);
+
+  // Build output: magic || key_len || encrypted_key || nonce || ciphertext
+  const keyLen = encryptedKey.length;
+  const output = new Uint8Array(4 + 2 + keyLen + 12 + ciphertext.length);
+
+  let offset = 0;
+  output.set(HYBRID_MAGIC, offset); offset += 4;
+  output[offset++] = keyLen & 0xff;
+  output[offset++] = (keyLen >> 8) & 0xff;
+  output.set(encryptedKey, offset); offset += keyLen;
+  output.set(nonce, offset); offset += 12;
+  output.set(ciphertext, offset);
+
+  return output;
+}
 
 // Configuration
 const NETWORK_ID = process.env.NEXT_PUBLIC_NETWORK_ID || 'mainnet';
@@ -506,9 +547,10 @@ export async function sendEmail(
     attachments: attachments || [],
   };
 
-  // Encrypt the entire payload with user's public key
+  // Encrypt the entire payload with hybrid encryption (ECIES key + ChaCha20-Poly1305 data)
+  // This is faster and works reliably for large attachments
   const payloadJson = JSON.stringify(payload);
-  const encryptedData = encrypt(pubkeyBytes, new TextEncoder().encode(payloadJson));
+  const encryptedData = encryptHybrid(pubkeyBytes, new TextEncoder().encode(payloadJson));
   const encryptedDataB64 = uint8ArrayToBase64(encryptedData);
 
   const params: Record<string, any> = {

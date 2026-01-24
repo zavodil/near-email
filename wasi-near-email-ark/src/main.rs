@@ -795,8 +795,6 @@ fn build_email_content(
     body: &str,
     attachments: &[Attachment],
 ) -> String {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-
     if attachments.is_empty() {
         // Simple text email
         format!(

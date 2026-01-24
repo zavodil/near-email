@@ -37,6 +37,7 @@ pub fn fetch_emails(
 }
 
 /// Send email via SMTP relay
+#[allow(dead_code)]
 pub fn send_email(
     api_url: &str,
     from_account: &str,
