@@ -5,45 +5,45 @@ import { setupHereWallet } from '@near-wallet-selector/here-wallet';
 import { setupMeteorWallet } from '@near-wallet-selector/meteor-wallet';
 import type { WalletSelector, AccountState } from '@near-wallet-selector/core';
 import { actionCreators } from '@near-js/transactions';
-import { PrivateKey, decrypt, encrypt } from 'eciesjs';
+import { PrivateKey, decrypt } from 'eciesjs';
 import { chacha20poly1305 } from '@noble/ciphers/chacha';
 import { randomBytes } from '@noble/ciphers/webcrypto';
+import { secp256k1 } from '@noble/curves/secp256k1';
+import { sha256 } from '@noble/hashes/sha256';
 
-// Hybrid encryption magic bytes (must match WASM)
-const HYBRID_MAGIC = new Uint8Array([0x48, 0x45, 0x30, 0x31]); // "HE01"
+// ECDH + ChaCha20 magic bytes (must match WASM)
+const ECDH_MAGIC = new Uint8Array([0x45, 0x43, 0x30, 0x31]); // "EC01"
 
 /**
- * Encrypt data using hybrid encryption (ECIES key + ChaCha20-Poly1305 data)
+ * Encrypt data using ECDH + ChaCha20-Poly1305
  *
- * Format: HE01 || key_len (2 bytes LE) || ECIES(symmetric_key) || nonce (12 bytes) || ciphertext+tag
+ * Format: EC01 || ephemeral_pubkey (33 bytes) || nonce (12 bytes) || ciphertext+tag
  *
- * This is much faster than pure ECIES for large data and works reliably in WASM.
+ * Uses standard ECDH for key agreement, no ECIES library dependencies.
  */
-function encryptHybrid(pubkeyBytes: Uint8Array, data: Uint8Array): Uint8Array {
-  // Generate random 32-byte symmetric key
-  const symmetricKey = randomBytes(32);
+function encryptEcdh(recipientPubkey: Uint8Array, data: Uint8Array): Uint8Array {
+  // Generate ephemeral keypair
+  const ephemeralPrivkey = secp256k1.utils.randomPrivateKey();
+  const ephemeralPubkey = secp256k1.getPublicKey(ephemeralPrivkey, true); // compressed (33 bytes)
 
-  // Generate random 12-byte nonce
+  // ECDH: shared_secret = ephemeral_priv * recipient_pub
+  const sharedPoint = secp256k1.getSharedSecret(ephemeralPrivkey, recipientPubkey, true);
+  // Derive key: SHA256(shared_secret) - skip first byte (prefix) for compatibility
+  const key = sha256(sharedPoint.slice(1));
+
+  // Generate random nonce
   const nonce = randomBytes(12);
 
-  // Encrypt symmetric key with ECIES (small data - always works)
-  const encryptedKey = encrypt(pubkeyBytes, symmetricKey);
-
-  // Encrypt data with ChaCha20-Poly1305
-  const cipher = chacha20poly1305(symmetricKey, nonce);
+  // Encrypt with ChaCha20-Poly1305
+  const cipher = chacha20poly1305(key, nonce);
   const ciphertext = cipher.encrypt(data);
 
-  // Build output: magic || key_len || encrypted_key || nonce || ciphertext
-  const keyLen = encryptedKey.length;
-  const output = new Uint8Array(4 + 2 + keyLen + 12 + ciphertext.length);
-
-  let offset = 0;
-  output.set(HYBRID_MAGIC, offset); offset += 4;
-  output[offset++] = keyLen & 0xff;
-  output[offset++] = (keyLen >> 8) & 0xff;
-  output.set(encryptedKey, offset); offset += keyLen;
-  output.set(nonce, offset); offset += 12;
-  output.set(ciphertext, offset);
+  // Build output: EC01 || ephemeral_pubkey (33) || nonce (12) || ciphertext
+  const output = new Uint8Array(4 + 33 + 12 + ciphertext.length);
+  output.set(ECDH_MAGIC, 0);
+  output.set(ephemeralPubkey, 4);
+  output.set(nonce, 4 + 33);
+  output.set(ciphertext, 4 + 33 + 12);
 
   return output;
 }
@@ -76,6 +76,8 @@ const OUTLAYER_CONTRACT = process.env.NEXT_PUBLIC_OUTLAYER_CONTRACT ||
 const PROJECT_ID = process.env.NEXT_PUBLIC_PROJECT_ID || 'near-email';
 const SECRETS_PROFILE = process.env.NEXT_PUBLIC_SECRETS_PROFILE || 'default';
 const SECRETS_ACCOUNT_ID = process.env.NEXT_PUBLIC_SECRETS_ACCOUNT_ID || '';
+// Whether to include secrets in OutLayer requests (can be disabled after master key migration)
+const USE_SECRETS = process.env.NEXT_PUBLIC_USE_SECRETS !== 'false'; // default: true
 
 let selector: WalletSelector | null = null;
 let modal: ReturnType<typeof setupModal> | null = null;
@@ -272,8 +274,8 @@ async function callOutLayerHttps(action: string, params: Record<string, any>): P
     },
   };
 
-  // Add secrets_ref if configured (same as transaction mode)
-  if (SECRETS_ACCOUNT_ID) {
+  // Add secrets_ref if configured and enabled
+  if (USE_SECRETS && SECRETS_ACCOUNT_ID) {
     requestBody.secrets_ref = {
       profile: SECRETS_PROFILE,
       account_id: SECRETS_ACCOUNT_ID,
@@ -369,8 +371,8 @@ export async function callOutLayer(action: string, params: Record<string, any>):
     response_format: 'Json',
   };
 
-  // Add secrets_ref if configured
-  if (SECRETS_ACCOUNT_ID) {
+  // Add secrets_ref if configured and enabled
+  if (USE_SECRETS && SECRETS_ACCOUNT_ID) {
     requestArgs.secrets_ref = {
       profile: SECRETS_PROFILE,
       account_id: SECRETS_ACCOUNT_ID,
@@ -547,10 +549,10 @@ export async function sendEmail(
     attachments: attachments || [],
   };
 
-  // Encrypt the entire payload with hybrid encryption (ECIES key + ChaCha20-Poly1305 data)
-  // This is faster and works reliably for large attachments
+  // Encrypt the entire payload with ECDH + ChaCha20-Poly1305
+  // No ECIES library - uses standard ECDH for reliable cross-platform compatibility
   const payloadJson = JSON.stringify(payload);
-  const encryptedData = encryptHybrid(pubkeyBytes, new TextEncoder().encode(payloadJson));
+  const encryptedData = encryptEcdh(pubkeyBytes, new TextEncoder().encode(payloadJson));
   const encryptedDataB64 = uint8ArrayToBase64(encryptedData);
 
   const params: Record<string, any> = {

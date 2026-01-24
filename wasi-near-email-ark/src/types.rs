@@ -76,6 +76,10 @@ pub enum Request {
         /// Client's ephemeral secp256k1 public key (hex, 33 bytes compressed)
         ephemeral_pubkey: String,
     },
+
+    /// Migrate master key from env (secrets) to worker storage
+    /// Only works if PROTECTED_MASTER_KEY is in env AND not already in storage
+    MigrateMasterKey,
 }
 
 // ==================== Response Types ====================
@@ -89,6 +93,7 @@ pub enum Response {
     GetEmailCount(GetEmailCountResponse),
     GetMasterPublicKey(GetMasterPublicKeyResponse),
     GetAttachment(GetAttachmentResponse),
+    MigrateMasterKey(MigrateMasterKeyResponse),
 }
 
 #[derive(Debug, Serialize)]
@@ -144,6 +149,14 @@ pub struct GetAttachmentResponse {
     pub filename: String,
     pub content_type: String,
     pub size: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MigrateMasterKeyResponse {
+    pub success: bool,
+    /// Master public key (hex) for verification
+    pub pubkey: String,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize)]

@@ -14,8 +14,83 @@ mod db;
 mod near; // Keep for potential future use
 mod types;
 
+use libsecp256k1::SecretKey;
 use outlayer::{env, storage};
 use types::*;
+
+// ==================== Hardcoded Config ====================
+// These values are constant and don't need to be in secrets
+
+/// Database API URL (internal service)
+const DATABASE_API_URL: &str = "http://db-api:8080";
+
+/// Email signature template (use %account% for sender's NEAR account)
+const EMAIL_SIGNATURE: Option<&str> = Some("Sent via near.email (%account%)");
+
+/// Storage key for master key in worker-encrypted storage
+const MASTER_KEY_STORAGE_KEY: &str = "master_key";
+
+// ==================== Config Functions ====================
+
+/// Get account suffix based on network (.near for mainnet, .testnet for testnet)
+/// Uses NEAR_NETWORK_ID env var injected by coordinator
+fn get_account_suffix() -> &'static str {
+    match std::env::var("NEAR_NETWORK_ID").as_deref() {
+        Ok("testnet") => ".testnet",
+        _ => ".near" // default to mainnet
+    }
+}
+
+/// Get master private key from env (secrets) or storage
+/// Priority: env (secrets, if running with secrets) > worker storage (after migration)
+fn get_master_key() -> Result<SecretKey, Box<dyn std::error::Error>> {
+    // 1. If PROTECTED_MASTER_KEY is in env (running with secrets), use it
+    if let Ok(key_hex) = std::env::var("PROTECTED_MASTER_KEY") {
+        return crypto::parse_private_key(&key_hex);
+    }
+
+    // 2. Otherwise read from worker storage (after migration)
+    if let Some(key_bytes) = storage::get_worker(MASTER_KEY_STORAGE_KEY)? {
+        let key_hex = String::from_utf8(key_bytes)
+            .map_err(|e| format!("Invalid master key encoding in storage: {}", e))?;
+        return crypto::parse_private_key(&key_hex);
+    }
+
+    // 3. Not found
+    Err("Master key not configured. Run migrate_master_key action or enable secrets.".into())
+}
+
+/// Handle migrate_master_key action
+/// Migrates master key from env (secrets) to worker-encrypted storage
+/// Only works if:
+/// 1. PROTECTED_MASTER_KEY exists in env (via secrets)
+/// 2. Key is NOT already in storage (prevents overwrite)
+fn handle_migrate_master_key() -> Result<Response, Box<dyn std::error::Error>> {
+    // 1. Check that key exists in env (must be running with secrets)
+    let key_from_env = std::env::var("PROTECTED_MASTER_KEY")
+        .map_err(|_| "PROTECTED_MASTER_KEY not found in env. Run with secrets enabled.")?;
+
+    // 2. Check that key is NOT already in storage (prevent overwrite)
+    let storage_key = format!("@worker:{}", MASTER_KEY_STORAGE_KEY);
+    if storage::has(&storage_key) {
+        return Err("Master key already exists in storage. Migration not needed.".into());
+    }
+
+    // 3. Validate the key
+    let privkey = crypto::parse_private_key(&key_from_env)?;
+
+    // 4. Save to worker storage (encrypted by OutLayer)
+    storage::set_worker(MASTER_KEY_STORAGE_KEY, key_from_env.as_bytes())?;
+
+    // 5. Return public key for verification
+    let pubkey = crypto::get_master_pubkey(&privkey);
+
+    Ok(Response::MigrateMasterKey(MigrateMasterKeyResponse {
+        success: true,
+        pubkey,
+        message: "Master key migrated to worker storage. Future runs don't need secrets.".to_string(),
+    }))
+}
 
 fn main() {
     // Force storage interface import by actually calling it (required for project context)
@@ -46,24 +121,22 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
     let input: Request = serde_json::from_slice(&raw_input)
         .map_err(|e| format!("Failed to parse input: {}. Raw: {}", e, raw_str))?;
 
-    // Get master private key from secrets
-    let master_privkey_hex = std::env::var("PROTECTED_MASTER_KEY")
-        .map_err(|_| "PROTECTED_MASTER_KEY not configured")?;
+    // Handle MigrateMasterKey before getting master key (it needs special logic)
+    if matches!(input, Request::MigrateMasterKey) {
+        return handle_migrate_master_key();
+    }
 
-    let master_privkey = crypto::parse_private_key(&master_privkey_hex)?;
+    // Get master private key from storage or env
+    let master_privkey = get_master_key()?;
 
-    // Helper to get database API URL
-    let get_db_api_url = || -> Result<String, Box<dyn std::error::Error>> {
-        std::env::var("DATABASE_API_URL")
-            .map_err(|_| "DATABASE_API_URL not configured".into())
-    };
+    // Use hardcoded database API URL
+    let db_api_url = DATABASE_API_URL;
 
-    // Default account suffix (.near for mainnet, .testnet for testnet)
-    let default_account_suffix = std::env::var("DEFAULT_ACCOUNT_SUFFIX")
-        .unwrap_or_else(|_| ".near".to_string());
+    // Get account suffix based on network
+    let default_account_suffix = get_account_suffix();
 
-    // Email signature template (use %account% for sender's NEAR account)
-    let email_signature = std::env::var("EMAIL_SIGNATURE").ok();
+    // Use hardcoded email signature
+    let email_signature = EMAIL_SIGNATURE;
 
     // Get authenticated signer from OutLayer
     let get_signer = || -> Result<String, Box<dyn std::error::Error>> {
@@ -90,7 +163,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
 
             // Fetch and decrypt emails with size limit
             let (email_data, inbox_next, sent_next) = fetch_combined_emails(
-                &get_db_api_url()?,
+                db_api_url,
                 &account_id,
                 &user_privkey,
                 &master_privkey,
@@ -123,26 +196,40 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
         } => {
             use base64::{engine::general_purpose::STANDARD, Engine};
 
+            eprintln!("[DEBUG] SendEmail: start, encrypted_data len={}", encrypted_data.len());
+
             let account_id = get_signer()?;
+            eprintln!("[DEBUG] SendEmail: account_id={}", account_id);
+
             let max_size = max_output_size.unwrap_or(DEFAULT_MAX_OUTPUT_SIZE);
             let ephemeral_pubkey_bytes = hex::decode(&ephemeral_pubkey)
                 .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?;
 
             // Validate sender account
-            validate_sender_account(&account_id, &default_account_suffix)?;
+            validate_sender_account(&account_id, default_account_suffix)?;
+            eprintln!("[DEBUG] SendEmail: validated sender");
 
             // Derive user's private key for decryption
             let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
+            eprintln!("[DEBUG] SendEmail: derived privkey");
 
             // Decrypt the combined payload (to, subject, body, attachments)
+            eprintln!("[DEBUG] SendEmail: decoding base64...");
             let ciphertext = STANDARD.decode(&encrypted_data)
                 .map_err(|e| format!("Invalid encrypted_data base64: {}", e))?;
+            eprintln!("[DEBUG] SendEmail: ciphertext len={}", ciphertext.len());
+
+            eprintln!("[DEBUG] SendEmail: decrypting ECIES...");
             let decrypted_bytes = crypto::decrypt_email(&user_privkey, &ciphertext)?;
+            eprintln!("[DEBUG] SendEmail: decrypted len={}", decrypted_bytes.len());
+
             let decrypted_json = String::from_utf8(decrypted_bytes)
                 .map_err(|e| format!("Invalid UTF-8 in encrypted_data: {}", e))?;
+            eprintln!("[DEBUG] SendEmail: parsed UTF-8");
 
             let payload: SendEmailPayload = serde_json::from_str(&decrypted_json)
                 .map_err(|e| format!("Invalid SendEmailPayload JSON: {}", e))?;
+            eprintln!("[DEBUG] SendEmail: parsed JSON, attachments count={}", payload.attachments.len());
 
             let to = payload.to;
             let subject = payload.subject;
@@ -155,18 +242,19 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
 
             // Build sender email address
             let sender_local = account_id
-                .strip_suffix(&default_account_suffix)
+                .strip_suffix(default_account_suffix)
                 .unwrap_or(&account_id);
             let sender_email = format!("{}@near.email", sender_local);
 
             // Add signature if configured
-            let body_with_sig = if let Some(ref sig_template) = email_signature {
+            let body_with_sig = if let Some(sig_template) = email_signature {
                 let signature = sig_template.replace("%account%", &account_id);
                 insert_signature_before_quote(&body, &signature)
             } else {
                 body.clone()
             };
 
+            eprintln!("[DEBUG] SendEmail: building email content...");
             // Build email content (with or without attachments)
             let email_content = build_email_content(
                 &sender_email,
@@ -175,67 +263,82 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 &body_with_sig,
                 &attachments,
             );
+            eprintln!("[DEBUG] SendEmail: email_content len={}", email_content.len());
 
             // Encrypt email for sender's sent folder
+            eprintln!("[DEBUG] SendEmail: encrypting for sender...");
             let encrypted_for_sender = crypto::encrypt_for_account(
                 &master_privkey,
                 &account_id,
                 email_content.as_bytes(),
             )?;
+            eprintln!("[DEBUG] SendEmail: encrypted_for_sender len={}", encrypted_for_sender.len());
 
             let message_id = if to.to_lowercase().ends_with(internal_suffix) {
                 // Internal email - encrypt and store directly
-                let recipient_account = extract_account_from_email(&to, internal_suffix, &default_account_suffix);
+                let recipient_account = extract_account_from_email(&to, internal_suffix, default_account_suffix);
+                eprintln!("[DEBUG] SendEmail: internal email to {}", recipient_account);
 
+                eprintln!("[DEBUG] SendEmail: encrypting for recipient...");
                 let encrypted = crypto::encrypt_for_account(
                     &master_privkey,
                     &recipient_account,
                     email_content.as_bytes(),
                 )?;
+                eprintln!("[DEBUG] SendEmail: encrypted len={}", encrypted.len());
 
+                eprintln!("[DEBUG] SendEmail: storing internal email...");
                 let email_id = db::store_internal_email(
-                    &get_db_api_url()?,
+                    db_api_url,
                     &recipient_account,
                     &sender_email,
                     &encrypted,
                 )?;
+                eprintln!("[DEBUG] SendEmail: stored, email_id={}", email_id);
 
                 // Store in sender's sent folder
+                eprintln!("[DEBUG] SendEmail: storing sent email...");
                 let _ = db::store_sent_email(
-                    &get_db_api_url()?,
+                    db_api_url,
                     &account_id,
                     &to,
                     &encrypted_for_sender,
                     tx_hash.as_deref(),
                 );
+                eprintln!("[DEBUG] SendEmail: stored sent");
 
                 Some(email_id)
             } else {
                 // External email - send via SMTP relay with attachments
+                eprintln!("[DEBUG] SendEmail: external email to {}", to);
+                eprintln!("[DEBUG] SendEmail: calling db::send_email_with_attachments...");
                 db::send_email_with_attachments(
-                    &get_db_api_url()?,
+                    db_api_url,
                     &account_id,
                     &to,
                     &subject,
                     &body_with_sig,
                     &attachments,
                 )?;
+                eprintln!("[DEBUG] SendEmail: sent external email");
 
                 // Store in sender's sent folder
+                eprintln!("[DEBUG] SendEmail: storing sent email...");
                 let _ = db::store_sent_email(
-                    &get_db_api_url()?,
+                    db_api_url,
                     &account_id,
                     &to,
                     &encrypted_for_sender,
                     tx_hash.as_deref(),
                 );
+                eprintln!("[DEBUG] SendEmail: stored sent");
 
                 None
             };
 
             // Fetch fresh inbox/sent preview after sending
             let (email_data, _, _) = fetch_combined_emails(
-                &get_db_api_url()?,
+                db_api_url,
                 &account_id,
                 &user_privkey,
                 &master_privkey,
@@ -268,14 +371,14 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?;
 
             // Delete email from database
-            let deleted = db::delete_email(&get_db_api_url()?, &email_id, &account_id)?;
+            let deleted = db::delete_email(db_api_url, &email_id, &account_id)?;
 
             // Derive user's private key for decryption
             let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
 
             // Fetch fresh inbox/sent preview after deleting
             let (email_data, _, _) = fetch_combined_emails(
-                &get_db_api_url()?,
+                db_api_url,
                 &account_id,
                 &user_privkey,
                 &master_privkey,
@@ -298,8 +401,8 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
         Request::GetEmailCount => {
             let account_id = get_signer()?;
 
-            let inbox_count = db::count_emails(&get_db_api_url()?, &account_id)?;
-            let sent_count = db::count_sent_emails(&get_db_api_url()?, &account_id)?;
+            let inbox_count = db::count_emails(db_api_url, &account_id)?;
+            let sent_count = db::count_sent_emails(db_api_url, &account_id)?;
 
             Ok(Response::GetEmailCount(GetEmailCountResponse {
                 success: true,
@@ -332,7 +435,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
 
             // Fetch encrypted attachment from database
             let attachment = db::fetch_attachment(
-                &get_db_api_url()?,
+                db_api_url,
                 &attachment_id,
                 &account_id,
             )?;
@@ -352,6 +455,9 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 size: attachment.size as usize,
             }))
         }
+
+        // Already handled at the beginning of process()
+        Request::MigrateMasterKey => unreachable!(),
     }
 }
 

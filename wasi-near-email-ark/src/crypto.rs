@@ -4,17 +4,17 @@
 //!
 //! Uses pure Rust crypto libraries for WASI compatibility:
 //! - libsecp256k1 (not secp256k1 which has C bindings)
-//! - Hybrid encryption: ECIES for key + ChaCha20-Poly1305 for data
+//! - ECDH + ChaCha20-Poly1305 for encryption (EC01 format)
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
-use libsecp256k1::{PublicKey, SecretKey};
+use libsecp256k1::{PublicKey, SecretKey, SharedSecret};
 use sha2::{Digest, Sha256};
 
-/// Magic bytes for hybrid encryption format v1
-const HYBRID_MAGIC: &[u8; 4] = b"HE01";
+/// Magic bytes for ECDH + ChaCha20 format (current)
+const ECDH_MAGIC: &[u8; 4] = b"EC01";
 
 /// Domain separation prefix for key derivation
 const DERIVATION_PREFIX: &[u8] = b"near-email:v1:";
@@ -55,7 +55,6 @@ pub fn derive_user_privkey(
         .map_err(|e| format!("Failed to create tweak: {:?}", e))?;
 
     // Add tweak to private key (scalar addition)
-    // Clone master and add tweak to it
     let mut user_privkey = master_privkey.clone();
     user_privkey.tweak_add_assign(&tweak)
         .map_err(|e| format!("Failed to derive private key: {:?}", e))?;
@@ -65,77 +64,69 @@ pub fn derive_user_privkey(
 
 /// Decrypt email data
 ///
-/// Supports two formats:
-/// 1. Hybrid (HE01): ECIES-encrypted 32-byte key + ChaCha20-Poly1305 encrypted data
-/// 2. Legacy ECIES: Pure ECIES encryption (for backward compatibility)
+/// Supports formats:
+/// 1. EC01: ECDH + ChaCha20-Poly1305 (current, from frontend and internal)
+/// 2. Legacy ECIES: For inbox emails from smtp-server (Rust ecies crate)
 ///
-/// Hybrid format (HE01):
-/// - Magic: "HE01" (4 bytes)
-/// - Key blob length: 2 bytes (little-endian u16)
-/// - ECIES encrypted symmetric key: key_blob_length bytes
+/// EC01 format:
+/// - Magic: "EC01" (4 bytes)
+/// - Ephemeral public key: 33 bytes (compressed)
 /// - Nonce: 12 bytes
 /// - ChaCha20-Poly1305 ciphertext + tag: remaining bytes
 pub fn decrypt_email(
     user_privkey: &SecretKey,
     encrypted: &[u8],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    // Check for hybrid format magic
-    if encrypted.len() > 4 && &encrypted[0..4] == HYBRID_MAGIC {
-        return decrypt_hybrid(user_privkey, encrypted);
+    // Check for EC01 format (ECDH + ChaCha20)
+    if encrypted.len() > 4 && &encrypted[0..4] == ECDH_MAGIC {
+        return decrypt_ecdh(user_privkey, encrypted);
     }
 
-    // Fallback to legacy ECIES
+    // Fallback to legacy ECIES (for inbox from smtp-server)
     let decrypted = ecies::decrypt(&user_privkey.serialize(), encrypted)
         .map_err(|e| format!("Decryption failed: {}", e))?;
     Ok(decrypted)
 }
 
-/// Decrypt data using hybrid encryption (ECIES key + ChaCha20-Poly1305 data)
-fn decrypt_hybrid(
+/// Decrypt data using ECDH + ChaCha20-Poly1305 (EC01 format)
+///
+/// Format: EC01 (4) || ephemeral_pubkey (33) || nonce (12) || ciphertext+tag
+fn decrypt_ecdh(
     user_privkey: &SecretKey,
     encrypted: &[u8],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    // Parse header
-    if encrypted.len() < 4 + 2 + 12 + 16 {
-        return Err("Hybrid encrypted data too short".into());
-    }
+    const HEADER_SIZE: usize = 4;       // EC01
+    const PUBKEY_SIZE: usize = 33;      // compressed pubkey
+    const NONCE_SIZE: usize = 12;
+    const TAG_SIZE: usize = 16;         // Poly1305 tag
+    const MIN_SIZE: usize = HEADER_SIZE + PUBKEY_SIZE + NONCE_SIZE + TAG_SIZE;
 
-    // Skip magic (4 bytes), read key blob length (2 bytes)
-    let key_len = u16::from_le_bytes([encrypted[4], encrypted[5]]) as usize;
-
-    let header_size = 4 + 2; // magic + key_len
-    let nonce_size = 12;
-    let min_size = header_size + key_len + nonce_size + 16; // +16 for tag
-
-    if encrypted.len() < min_size {
+    if encrypted.len() < MIN_SIZE {
         return Err(format!(
-            "Hybrid data too short: {} bytes, need at least {}",
-            encrypted.len(),
-            min_size
+            "EC01 data too short: {} bytes, need at least {}",
+            encrypted.len(), MIN_SIZE
         ).into());
     }
 
-    // Extract ECIES-encrypted symmetric key
-    let key_blob = &encrypted[header_size..header_size + key_len];
+    // Parse ephemeral public key
+    let ephemeral_pubkey_bytes = &encrypted[HEADER_SIZE..HEADER_SIZE + PUBKEY_SIZE];
+    let ephemeral_pubkey = PublicKey::parse_slice(ephemeral_pubkey_bytes, None)
+        .map_err(|e| format!("Invalid ephemeral pubkey: {:?}", e))?;
 
-    // Decrypt symmetric key using ECIES
-    let symmetric_key = ecies::decrypt(&user_privkey.serialize(), key_blob)
-        .map_err(|e| format!("Failed to decrypt symmetric key: {}", e))?;
+    // ECDH: shared_secret = privkey * ephemeral_pubkey
+    let shared_secret = SharedSecret::new(&ephemeral_pubkey, user_privkey)
+        .map_err(|e| format!("ECDH failed: {:?}", e))?;
 
-    if symmetric_key.len() != 32 {
-        return Err(format!(
-            "Invalid symmetric key length: {} (expected 32)",
-            symmetric_key.len()
-        ).into());
-    }
+    // Derive key: SHA256(shared_secret)
+    let key: [u8; 32] = Sha256::digest(shared_secret.as_ref()).into();
 
     // Extract nonce and ciphertext
-    let nonce_start = header_size + key_len;
-    let nonce_bytes = &encrypted[nonce_start..nonce_start + nonce_size];
-    let ciphertext = &encrypted[nonce_start + nonce_size..];
+    let nonce_start = HEADER_SIZE + PUBKEY_SIZE;
+    let nonce_bytes = &encrypted[nonce_start..nonce_start + NONCE_SIZE];
+    let ciphertext = &encrypted[nonce_start + NONCE_SIZE..];
 
-    // Decrypt data using ChaCha20-Poly1305
-    let cipher = ChaCha20Poly1305::new_from_slice(&symmetric_key)
+    // Decrypt with ChaCha20-Poly1305
+    let cipher = ChaCha20Poly1305::new_from_slice(&key)
         .map_err(|e| format!("Failed to create cipher: {:?}", e))?;
     let nonce = Nonce::from_slice(nonce_bytes);
 
@@ -157,10 +148,10 @@ pub fn derive_user_pubkey(
     Ok(pubkey.serialize_compressed().to_vec())
 }
 
-/// Encrypt data for a specific NEAR account using hybrid encryption
-/// Used for internal email sending (NEAR to NEAR)
+/// Encrypt data for a specific NEAR account using ECDH + ChaCha20-Poly1305
+/// Used for internal email sending (NEAR to NEAR) and sent folder
 ///
-/// Format: HE01 || key_len (2 bytes) || ECIES(symmetric_key) || nonce (12 bytes) || ChaCha20-Poly1305(data)
+/// Format: EC01 || ephemeral_pubkey (33 bytes) || nonce (12 bytes) || ciphertext+tag
 pub fn encrypt_for_account(
     master_privkey: &SecretKey,
     account_id: &str,
@@ -168,22 +159,30 @@ pub fn encrypt_for_account(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     use rand::RngCore;
 
-    let user_pubkey = derive_user_pubkey(master_privkey, account_id)?;
+    let user_pubkey_bytes = derive_user_pubkey(master_privkey, account_id)?;
+    let user_pubkey = PublicKey::parse_slice(&user_pubkey_bytes, None)
+        .map_err(|e| format!("Invalid user pubkey: {:?}", e))?;
 
-    // Generate random 32-byte symmetric key
-    let mut symmetric_key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut symmetric_key);
+    // Generate ephemeral keypair
+    let mut ephemeral_privkey_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut ephemeral_privkey_bytes);
+    let ephemeral_privkey = SecretKey::parse_slice(&ephemeral_privkey_bytes)
+        .map_err(|e| format!("Failed to create ephemeral key: {:?}", e))?;
+    let ephemeral_pubkey = PublicKey::from_secret_key(&ephemeral_privkey);
 
-    // Generate random 12-byte nonce
+    // ECDH: shared_secret = ephemeral_privkey * user_pubkey
+    let shared_secret = SharedSecret::new(&user_pubkey, &ephemeral_privkey)
+        .map_err(|e| format!("ECDH failed: {:?}", e))?;
+
+    // Derive key: SHA256(shared_secret)
+    let key: [u8; 32] = Sha256::digest(shared_secret.as_ref()).into();
+
+    // Generate random nonce
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
 
-    // Encrypt symmetric key with ECIES
-    let encrypted_key = ecies::encrypt(&user_pubkey, &symmetric_key)
-        .map_err(|e| format!("Failed to encrypt symmetric key: {}", e))?;
-
-    // Encrypt data with ChaCha20-Poly1305
-    let cipher = ChaCha20Poly1305::new_from_slice(&symmetric_key)
+    // Encrypt with ChaCha20-Poly1305
+    let cipher = ChaCha20Poly1305::new_from_slice(&key)
         .map_err(|e| format!("Failed to create cipher: {:?}", e))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -191,12 +190,11 @@ pub fn encrypt_for_account(
         .encrypt(nonce, data)
         .map_err(|e| format!("ChaCha20-Poly1305 encryption failed: {:?}", e))?;
 
-    // Build output: magic || key_len || encrypted_key || nonce || ciphertext
-    let key_len = encrypted_key.len() as u16;
-    let mut output = Vec::with_capacity(4 + 2 + encrypted_key.len() + 12 + ciphertext.len());
-    output.extend_from_slice(HYBRID_MAGIC);
-    output.extend_from_slice(&key_len.to_le_bytes());
-    output.extend_from_slice(&encrypted_key);
+    // Build output: EC01 || ephemeral_pubkey || nonce || ciphertext
+    let ephemeral_pubkey_compressed = ephemeral_pubkey.serialize_compressed();
+    let mut output = Vec::with_capacity(4 + 33 + 12 + ciphertext.len());
+    output.extend_from_slice(ECDH_MAGIC);
+    output.extend_from_slice(&ephemeral_pubkey_compressed);
     output.extend_from_slice(&nonce_bytes);
     output.extend_from_slice(&ciphertext);
 
