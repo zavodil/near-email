@@ -5,7 +5,7 @@
 use crate::{crypto, db};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use mailin_embedded::{response, Handler, Response};
-use mail_parser::MessageParser;
+use mail_parser::{MessageParser, MimeHeaders};
 use secp256k1::PublicKey;
 use serde::Serialize;
 use sqlx::PgPool;
@@ -191,8 +191,8 @@ impl NearEmailHandler {
                         Ok(att_id) => {
                             metas.push(AttachmentMeta {
                                 id: att_id,
-                                filename: filename.clone(),
-                                content_type: content_type.clone(),
+                                filename: filename.to_string(),
+                                content_type: content_type.to_string(),
                                 size: att_data.len(),
                             });
                         }
