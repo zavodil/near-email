@@ -17,6 +17,7 @@ mod types;
 
 use libsecp256k1::SecretKey;
 use outlayer::{env, storage};
+use serde::{Deserialize, Serialize};
 use types::*;
 
 // ==================== Hardcoded Config ====================
@@ -28,11 +29,17 @@ const DATABASE_API_URL: &str = "https://mail.near.email";
 /// Email signature template (use %account% for sender's NEAR account)
 const EMAIL_SIGNATURE: Option<&str> = Some("Sent onchain by %account% via OutLayer");
 
-/// Storage key for master key in worker-encrypted storage
-const MASTER_KEY_STORAGE_KEY: &str = "master_key";
+/// Storage key for combined config (master_key + api_secret)
+/// Single storage read instead of 2 separate reads
+const CONFIG_STORAGE_KEY: &str = "config";
 
-/// Storage key for API secret in worker-encrypted storage
-const API_SECRET_STORAGE_KEY: &str = "api_secret";
+/// Combined config stored in worker storage
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredConfig {
+    master_key: String,
+    #[serde(default)]
+    api_secret: Option<String>,
+}
 
 // ==================== Config Functions ====================
 
@@ -45,120 +52,89 @@ fn get_account_suffix() -> &'static str {
     }
 }
 
-/// Get master private key from env (secrets) or storage
-/// Priority: env (secrets, if running with secrets) > worker storage (after migration)
-fn get_master_key() -> Result<SecretKey, Box<dyn std::error::Error>> {
-    // 1. If PROTECTED_MASTER_KEY is in env (running with secrets), use it
-    if let Ok(key_hex) = std::env::var("PROTECTED_MASTER_KEY") {
-        return crypto::parse_private_key(&key_hex);
-    }
-
-    // 2. Otherwise read from worker storage (after migration)
-    if let Some(key_bytes) = storage::get_worker(MASTER_KEY_STORAGE_KEY)? {
-        let key_hex = String::from_utf8(key_bytes)
-            .map_err(|e| format!("Invalid master key encoding in storage: {}", e))?;
-        return crypto::parse_private_key(&key_hex);
-    }
-
-    // 3. Not found
-    Err("Master key not configured. Run migrate_master_key action or enable secrets.".into())
+/// Runtime config - loaded once at startup
+struct RuntimeConfig {
+    master_key: SecretKey,
+    api_secret: Option<String>,
 }
 
-/// Get API secret from storage (preferred) or env (secrets)
-/// Returns None if not configured (db-api may still work if it doesn't require auth)
-fn get_api_secret() -> Option<String> {
-    // 1. Check worker storage first (after migration)
-    if let Ok(Some(secret_bytes)) = storage::get_worker(API_SECRET_STORAGE_KEY) {
-        if let Ok(secret) = String::from_utf8(secret_bytes) {
-            if !secret.is_empty() {
-                return Some(secret);
-            }
-        }
+/// Load config from env (if secrets enabled) or storage (after migration)
+/// Priority: env > storage (env takes precedence to allow override)
+/// Returns error if master_key not found in either place
+fn load_config() -> Result<RuntimeConfig, Box<dyn std::error::Error>> {
+    // 1. If PROTECTED_MASTER_KEY is in env, use env for everything (secrets mode)
+    if let Ok(master_key_hex) = std::env::var("PROTECTED_MASTER_KEY") {
+        let master_key = crypto::parse_private_key(&master_key_hex)?;
+        let api_secret = std::env::var("API_SECRET").ok().filter(|s| !s.is_empty());
+        return Ok(RuntimeConfig { master_key, api_secret });
     }
 
-    // 2. Fall back to env (running with secrets)
-    std::env::var("API_SECRET").ok().filter(|s| !s.is_empty())
+    // 2. No env secrets - read from storage (single read for both values)
+    if let Some(config_bytes) = storage::get_worker(CONFIG_STORAGE_KEY)? {
+        let stored: StoredConfig = serde_json::from_slice(&config_bytes)
+            .map_err(|e| format!("Invalid config JSON in storage: {}", e))?;
+        let master_key = crypto::parse_private_key(&stored.master_key)?;
+        return Ok(RuntimeConfig {
+            master_key,
+            api_secret: stored.api_secret,
+        });
+    }
+
+    // 3. Not found anywhere
+    Err("Master key not configured. Run migrate_master_key action or enable secrets.".into())
 }
 
 /// Handle migrate_master_key action
 /// Migrates master key AND api_secret from env (secrets) to worker-encrypted storage
-/// Rules:
-/// - Master key: only migrates if NOT already in storage (prevents overwrite)
-/// - API secret: only migrates if NOT already in storage (prevents overwrite)
-/// - At least one of PROTECTED_MASTER_KEY or API_SECRET must be in env
+/// Stores both in a single JSON object for optimized reads (1 storage call instead of 2)
 fn handle_migrate_master_key() -> Result<Response, Box<dyn std::error::Error>> {
-    let master_key_storage = format!("@worker:{}", MASTER_KEY_STORAGE_KEY);
-    let api_secret_storage = format!("@worker:{}", API_SECRET_STORAGE_KEY);
+    // Check if config already exists in storage (cannot be overwritten!)
+    if let Some(config_bytes) = storage::get_worker(CONFIG_STORAGE_KEY)? {
+        // Already migrated - return existing pubkey
+        let config: StoredConfig = serde_json::from_slice(&config_bytes)
+            .map_err(|e| format!("Invalid config JSON in storage: {}", e))?;
+        let privkey = crypto::parse_private_key(&config.master_key)?;
+        let pubkey = crypto::get_master_pubkey(&privkey);
+        return Ok(Response::MigrateMasterKey(MigrateMasterKeyResponse {
+            success: true,
+            pubkey,
+            message: "Config already in storage. Migration not needed.".to_string(),
+        }));
+    }
 
-    let master_key_in_storage = storage::has(&master_key_storage);
-    let api_secret_in_storage = storage::has(&api_secret_storage);
-
+    // Get values from env
     let master_key_from_env = std::env::var("PROTECTED_MASTER_KEY").ok().filter(|s| !s.is_empty());
     let api_secret_from_env = std::env::var("API_SECRET").ok().filter(|s| !s.is_empty());
 
-    // Need at least one thing to migrate
-    let can_migrate_master = master_key_from_env.is_some() && !master_key_in_storage;
-    let can_migrate_secret = api_secret_from_env.is_some() && !api_secret_in_storage;
+    // Need master key to migrate
+    let master_key = master_key_from_env.ok_or(
+        "PROTECTED_MASTER_KEY not found in env. Run with secrets enabled."
+    )?;
 
-    if !can_migrate_master && !can_migrate_secret {
-        if master_key_in_storage && api_secret_in_storage {
-            return Err("Both master key and API secret already in storage. Migration not needed.".into());
-        }
-        if master_key_from_env.is_none() && api_secret_from_env.is_none() {
-            return Err("Neither PROTECTED_MASTER_KEY nor API_SECRET found in env. Run with secrets enabled.".into());
-        }
-        // One is in storage, the other is not in env
-        let mut msg = String::new();
-        if master_key_in_storage {
-            msg.push_str("Master key already in storage. ");
-        }
-        if api_secret_in_storage {
-            msg.push_str("API secret already in storage. ");
-        }
-        if master_key_from_env.is_none() {
-            msg.push_str("PROTECTED_MASTER_KEY not in env. ");
-        }
-        if api_secret_from_env.is_none() {
-            msg.push_str("API_SECRET not in env. ");
-        }
-        return Err(format!("Nothing to migrate. {}", msg).into());
-    }
+    // Validate master key and get pubkey
+    let privkey = crypto::parse_private_key(&master_key)?;
+    let pubkey = crypto::get_master_pubkey(&privkey);
 
-    let mut messages = Vec::new();
-    let mut pubkey = String::new();
+    // Create combined config
+    let config = StoredConfig {
+        master_key,
+        api_secret: api_secret_from_env.clone(),
+    };
 
-    // Migrate master key if possible
-    if can_migrate_master {
-        let key = master_key_from_env.unwrap();
-        let privkey = crypto::parse_private_key(&key)?;
-        storage::set_worker(MASTER_KEY_STORAGE_KEY, key.as_bytes())?;
-        pubkey = crypto::get_master_pubkey(&privkey);
-        messages.push("Master key migrated");
-    } else if master_key_in_storage {
-        // Get pubkey from storage for response
-        if let Ok(Some(key_bytes)) = storage::get_worker(MASTER_KEY_STORAGE_KEY) {
-            if let Ok(key_hex) = String::from_utf8(key_bytes) {
-                if let Ok(privkey) = crypto::parse_private_key(&key_hex) {
-                    pubkey = crypto::get_master_pubkey(&privkey);
-                }
-            }
-        }
-        messages.push("Master key already in storage");
-    }
+    // Store as JSON (single storage write)
+    let config_json = serde_json::to_vec(&config)?;
+    storage::set_worker(CONFIG_STORAGE_KEY, &config_json)?;
 
-    // Migrate API secret if possible
-    if can_migrate_secret {
-        let secret = api_secret_from_env.unwrap();
-        storage::set_worker(API_SECRET_STORAGE_KEY, secret.as_bytes())?;
-        messages.push("API secret migrated");
-    } else if api_secret_in_storage {
-        messages.push("API secret already in storage");
-    }
+    let message = if api_secret_from_env.is_some() {
+        "Config migrated (master_key + api_secret). Future runs don't need secrets."
+    } else {
+        "Config migrated (master_key only). Future runs don't need secrets."
+    };
 
     Ok(Response::MigrateMasterKey(MigrateMasterKeyResponse {
         success: true,
         pubkey,
-        message: format!("{}. Future runs don't need secrets.", messages.join(", ")),
+        message: message.to_string(),
     }))
 }
 
@@ -191,16 +167,16 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
     let input: Request = serde_json::from_slice(&raw_input)
         .map_err(|e| format!("Failed to parse input: {}. Raw: {}", e, raw_str))?;
 
-    // Handle MigrateMasterKey before getting master key (it needs special logic)
+    // Handle MigrateMasterKey before loading config (it needs special logic)
     if matches!(input, Request::MigrateMasterKey) {
         return handle_migrate_master_key();
     }
 
-    // Get master private key from storage or env
-    let master_privkey = get_master_key()?;
-
-    // Get API secret for authenticating db-api requests
-    let api_secret = get_api_secret();
+    // Load config: env first (if secrets enabled), then storage (after migration)
+    // Single storage read for both master_key and api_secret
+    let config = load_config()?;
+    let master_privkey = config.master_key;
+    let api_secret = config.api_secret;
 
     // Use hardcoded database API URL
     let db_api_url = DATABASE_API_URL;
