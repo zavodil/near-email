@@ -1,11 +1,13 @@
 import { useState, useRef } from 'react';
 import type { Attachment } from '@/lib/near';
+import { MAX_SEND_FILE_SIZE, MAX_SEND_TOTAL_SIZE } from '@/lib/near';
 
 interface ComposeModalProps {
   fromAddress: string;
   onClose: () => void;
   onSent: (to: string, subject: string, body: string, attachments?: Attachment[]) => Promise<void>;
   onSuccess?: () => void;
+  onShowLimits?: () => void;
   // Optional initial values for reply
   initialTo?: string;
   initialSubject?: string;
@@ -17,6 +19,7 @@ export default function ComposeModal({
   onClose,
   onSent,
   onSuccess,
+  onShowLimits,
   initialTo = '',
   initialSubject = '',
   initialBody = '',
@@ -43,17 +46,14 @@ export default function ComposeModal({
     const files = e.target.files;
     if (!files) return;
 
-    const maxSize = 10 * 1024 * 1024; // 10MB per file
-    const maxTotal = 40 * 1024 * 1024; // 40MB total
-
     for (const file of Array.from(files)) {
-      if (file.size > maxSize) {
-        setError(`File "${file.name}" is too large (max 10MB per file)`);
+      if (file.size > MAX_SEND_FILE_SIZE) {
+        setError(`File "${file.name}" is too large (${formatSize(file.size)}). Maximum: ${formatSize(MAX_SEND_FILE_SIZE)} per file`);
         continue;
       }
 
-      if (getTotalSize() + file.size > maxTotal) {
-        setError('Total attachments size exceeds 40MB limit');
+      if (getTotalSize() + file.size > MAX_SEND_TOTAL_SIZE) {
+        setError(`Total size (${formatSize(getTotalSize() + file.size)}) exceeds limit (${formatSize(MAX_SEND_TOTAL_SIZE)}). Remove some attachments.`);
         break;
       }
 
@@ -171,8 +171,18 @@ export default function ComposeModal({
                   {attachments.length} {attachments.length === 1 ? 'file' : 'files'}
                 </span>
                 <span className="text-xs text-gray-400">
-                  {formatSize(getTotalSize())}
+                  {formatSize(getTotalSize())} / {formatSize(MAX_SEND_TOTAL_SIZE)}
                 </span>
+              </div>
+              {/* Progress bar */}
+              <div className="w-full bg-gray-200 rounded-full h-1.5">
+                <div
+                  className={`h-1.5 rounded-full transition-all ${
+                    getTotalSize() > MAX_SEND_TOTAL_SIZE * 0.9 ? 'bg-red-500' :
+                    getTotalSize() > MAX_SEND_TOTAL_SIZE * 0.7 ? 'bg-yellow-500' : 'bg-blue-500'
+                  }`}
+                  style={{ width: `${Math.min(100, (getTotalSize() / MAX_SEND_TOTAL_SIZE) * 100)}%` }}
+                />
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {attachments.map((att, idx) => (
@@ -184,6 +194,7 @@ export default function ComposeModal({
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
                     </svg>
                     <span className="text-gray-700 max-w-[120px] truncate">{att.filename}</span>
+                    <span className="text-gray-400">({formatSize(att.size)})</span>
                     <button
                       onClick={() => removeAttachment(idx)}
                       className="text-gray-400 hover:text-red-500 transition-colors"
@@ -195,6 +206,15 @@ export default function ComposeModal({
                   </div>
                 ))}
               </div>
+              {/* Limits hint */}
+              {onShowLimits && (
+                <button
+                  onClick={onShowLimits}
+                  className="text-xs text-blue-500 hover:underline"
+                >
+                  View size limits
+                </button>
+              )}
             </div>
           )}
         </div>

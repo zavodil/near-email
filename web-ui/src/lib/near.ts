@@ -73,6 +73,15 @@ const PAYMENT_KEY_ENABLED_STORAGE = 'near-email-payment-key-enabled';
 const MAX_OUTPUT_SIZE_TRANSACTION = 1_500_000;  // 1.5 MB
 const MAX_OUTPUT_SIZE_HTTPS = 25_000_000;       // 25 MB
 
+// ===== SIZE LIMITS FOR UI =====
+// Sending limits (HTTP body limit = 10 MB, minus JSON/encryption overhead + base64)
+export const MAX_SEND_FILE_SIZE = 5 * 1024 * 1024; // 5 MB per file
+export const MAX_SEND_TOTAL_SIZE = 7 * 1024 * 1024; // 7 MB total
+
+// Download limits (max_output_size with ~33% base64 overhead accounted)
+export const MAX_DOWNLOAD_SIZE_TRANSACTION = 1_100_000; // ~1.1 MB raw (1.5 MB / 1.33)
+export const MAX_DOWNLOAD_SIZE_HTTPS = 18_000_000; // ~18 MB raw (25 MB / 1.33)
+
 // Helper to convert Uint8Array to base64 without stack overflow
 // Note: String.fromCharCode(...largeArray) crashes with "Maximum call stack size exceeded" for arrays > ~100KB
 function uint8ArrayToBase64(bytes: Uint8Array): string {
@@ -201,6 +210,11 @@ export function getPaymentKeyConfig(): { enabled: boolean; owner: string | null;
 // Check if using payment key mode
 export function isPaymentKeyMode(): boolean {
   return paymentKeyConfig.enabled && paymentKeyConfig.key !== null;
+}
+
+// Get max download size for current mode (used for attachment size checks)
+export function getMaxDownloadSize(): number {
+  return isPaymentKeyMode() ? MAX_DOWNLOAD_SIZE_HTTPS : MAX_DOWNLOAD_SIZE_TRANSACTION;
 }
 
 // Get default max output size based on current mode

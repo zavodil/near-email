@@ -11,6 +11,7 @@ import {
   setPaymentKeyEnabled,
   getPaymentKeyConfig,
   getPaymentKeyOwner,
+  isPaymentKeyMode,
   type Email,
   type SentEmail,
   type GetEmailsResult,
@@ -21,6 +22,7 @@ import SentEmailList from '@/components/SentEmailList';
 import EmailView from '@/components/EmailView';
 import SentEmailView from '@/components/SentEmailView';
 import ComposeModal from '@/components/ComposeModal';
+import LimitsModal from '@/components/LimitsModal';
 import Toast, { type ToastType } from '@/components/Toast';
 
 interface HomeProps {
@@ -57,6 +59,8 @@ export default function Home({ accounts, loading }: HomeProps) {
   const [showPaymentKeyInput, setShowPaymentKeyInput] = useState(false);
   const [paymentKeyInput, setPaymentKeyInput] = useState('');
   const [paymentKeyError, setPaymentKeyError] = useState<string | null>(null);
+  // Limits modal state
+  const [showLimitsModal, setShowLimitsModal] = useState(false);
 
   function showToast(message: string, type: ToastType = 'success') {
     setToast({ message, type });
@@ -419,6 +423,16 @@ export default function Home({ accounts, loading }: HomeProps) {
             </svg>
             Compose
           </button>
+          {/* Limits info button */}
+          <button
+            onClick={() => setShowLimitsModal(true)}
+            className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+            title="View size limits"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </button>
           {/* Account dropdown */}
           <div className="relative">
             <button
@@ -637,11 +651,19 @@ export default function Home({ accounts, loading }: HomeProps) {
           onClose={() => setShowCompose(false)}
           onSent={handleSend}
           onSuccess={() => showToast('Email sent successfully!')}
+          onShowLimits={() => setShowLimitsModal(true)}
           initialTo={replyTo}
           initialSubject={replySubject}
           initialBody={replyBody}
         />
       )}
+
+      {/* Limits modal */}
+      <LimitsModal
+        isOpen={showLimitsModal}
+        onClose={() => setShowLimitsModal(false)}
+        isHttpsMode={isPaymentKeyMode()}
+      />
 
       {/* Toast notification */}
       {toast && (
