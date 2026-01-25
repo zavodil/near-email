@@ -29,11 +29,15 @@ services:
       SMTP_HOST: 0.0.0.0
       SMTP_PORT: 25
       EMAIL_DOMAIN: near.email
+      DB_API_URL: http://db-api:8080
+      API_SECRET: ${API_SECRET}
     ports:
       - "25:25"
     depends_on:
       postgres:
         condition: service_healthy
+      db-api:
+        condition: service_started
 
   # Database API (for WASI module HTTP access)
   db-api:
@@ -47,6 +51,8 @@ services:
       # DKIM signing for outgoing emails
       DKIM_PRIVATE_KEY: ${DKIM_PRIVATE_KEY}
       DKIM_SELECTOR: ${DKIM_SELECTOR:-mail}
+      # API secret for authenticating requests
+      API_SECRET: ${API_SECRET}
     ports:
       - "8080:8080"
     depends_on:

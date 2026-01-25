@@ -10,7 +10,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
-use libsecp256k1::{PublicKey, SecretKey, SharedSecret};
+use libsecp256k1::{PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 
 /// Magic bytes for ECDH + ChaCha20 format (current)
@@ -110,15 +110,19 @@ fn decrypt_ecdh(
 
     // Parse ephemeral public key
     let ephemeral_pubkey_bytes = &encrypted[HEADER_SIZE..HEADER_SIZE + PUBKEY_SIZE];
-    let ephemeral_pubkey = PublicKey::parse_slice(ephemeral_pubkey_bytes, None)
+    let mut shared_point = PublicKey::parse_slice(ephemeral_pubkey_bytes, None)
         .map_err(|e| format!("Invalid ephemeral pubkey: {:?}", e))?;
 
-    // ECDH: shared_secret = privkey * ephemeral_pubkey
-    let shared_secret = SharedSecret::new(&ephemeral_pubkey, user_privkey)
+    // ECDH: shared_point = ephemeral_pubkey * user_privkey
+    shared_point.tweak_mul_assign(user_privkey)
         .map_err(|e| format!("ECDH failed: {:?}", e))?;
 
-    // Derive key: SHA256(shared_secret)
-    let key: [u8; 32] = Sha256::digest(shared_secret.as_ref()).into();
+    // Extract x-coordinate (skip prefix byte from compressed pubkey)
+    let shared_compressed = shared_point.serialize_compressed();
+    let shared_x = &shared_compressed[1..];
+
+    // Derive key: SHA256(x-coordinate)
+    let key: [u8; 32] = Sha256::digest(shared_x).into();
 
     // Extract nonce and ciphertext
     let nonce_start = HEADER_SIZE + PUBKEY_SIZE;
@@ -170,12 +174,16 @@ pub fn encrypt_for_account(
         .map_err(|e| format!("Failed to create ephemeral key: {:?}", e))?;
     let ephemeral_pubkey = PublicKey::from_secret_key(&ephemeral_privkey);
 
-    // ECDH: shared_secret = ephemeral_privkey * user_pubkey
-    let shared_secret = SharedSecret::new(&user_pubkey, &ephemeral_privkey)
+    // ECDH: shared_point = user_pubkey * ephemeral_privkey
+    let mut shared_point = user_pubkey.clone();
+    shared_point.tweak_mul_assign(&ephemeral_privkey)
         .map_err(|e| format!("ECDH failed: {:?}", e))?;
 
-    // Derive key: SHA256(shared_secret)
-    let key: [u8; 32] = Sha256::digest(shared_secret.as_ref()).into();
+    // Extract x-coordinate (skip prefix byte from compressed pubkey)
+    let shared_x = &shared_point.serialize_compressed()[1..];
+
+    // Derive key: SHA256(x-coordinate)
+    let key: [u8; 32] = Sha256::digest(shared_x).into();
 
     // Generate random nonce
     let mut nonce_bytes = [0u8; 12];

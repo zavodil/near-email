@@ -36,11 +36,16 @@ services:
       EMAIL_DOMAIN: near.email
       # TESTNET: vadim@near.email -> vadim.testnet
       DEFAULT_ACCOUNT_SUFFIX: .testnet
+      # db-api is on host network, so use host IP from docker bridge
+      DB_API_URL: http://172.17.0.1:8080
+      API_SECRET: ${API_SECRET}
     ports:
       - "25:25"
     depends_on:
       postgres:
         condition: service_healthy
+      db-api:
+        condition: service_started
 
   # Database API (for WASI module HTTP access)
   db-api:
@@ -67,6 +72,8 @@ services:
       SMTP_RELAY_USER: ${SMTP_RELAY_USER:-resend}
       SMTP_RELAY_PASSWORD: ${SMTP_RELAY_PASSWORD:-}
       SMTP_RELAY_ENABLED: ${SMTP_RELAY_ENABLED:-true}
+      # API secret for authenticating requests
+      API_SECRET: ${API_SECRET}
     # ports not needed with network_mode: host (8080 exposed directly)
     depends_on:
       postgres:

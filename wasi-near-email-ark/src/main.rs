@@ -10,25 +10,36 @@
 
 mod crypto;
 mod db;
+mod http_chunked;
 #[allow(dead_code)]
 mod near; // Keep for potential future use
 mod types;
 
 use libsecp256k1::SecretKey;
 use outlayer::{env, storage};
+use serde::{Deserialize, Serialize};
 use types::*;
 
 // ==================== Hardcoded Config ====================
 // These values are constant and don't need to be in secrets
 
 /// Database API URL (internal service)
-const DATABASE_API_URL: &str = "http://db-api:8080";
+const DATABASE_API_URL: &str = "https://mail.near.email";
 
 /// Email signature template (use %account% for sender's NEAR account)
-const EMAIL_SIGNATURE: Option<&str> = Some("Sent via near.email (%account%)");
+const EMAIL_SIGNATURE: Option<&str> = Some("Sent onchain by %account% via OutLayer");
 
-/// Storage key for master key in worker-encrypted storage
-const MASTER_KEY_STORAGE_KEY: &str = "master_key";
+/// Storage key for combined config (master_key + api_secret)
+/// Single storage read instead of 2 separate reads
+const CONFIG_STORAGE_KEY: &str = "config";
+
+/// Combined config stored in worker storage
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredConfig {
+    master_key: String,
+    #[serde(default)]
+    api_secret: Option<String>,
+}
 
 // ==================== Config Functions ====================
 
@@ -41,54 +52,89 @@ fn get_account_suffix() -> &'static str {
     }
 }
 
-/// Get master private key from env (secrets) or storage
-/// Priority: env (secrets, if running with secrets) > worker storage (after migration)
-fn get_master_key() -> Result<SecretKey, Box<dyn std::error::Error>> {
-    // 1. If PROTECTED_MASTER_KEY is in env (running with secrets), use it
-    if let Ok(key_hex) = std::env::var("PROTECTED_MASTER_KEY") {
-        return crypto::parse_private_key(&key_hex);
+/// Runtime config - loaded once at startup
+struct RuntimeConfig {
+    master_key: SecretKey,
+    api_secret: Option<String>,
+}
+
+/// Load config from env (if secrets enabled) or storage (after migration)
+/// Priority: env > storage (env takes precedence to allow override)
+/// Returns error if master_key not found in either place
+fn load_config() -> Result<RuntimeConfig, Box<dyn std::error::Error>> {
+    // 1. If PROTECTED_MASTER_KEY is in env, use env for everything (secrets mode)
+    if let Ok(master_key_hex) = std::env::var("PROTECTED_MASTER_KEY") {
+        let master_key = crypto::parse_private_key(&master_key_hex)?;
+        let api_secret = std::env::var("API_SECRET").ok().filter(|s| !s.is_empty());
+        return Ok(RuntimeConfig { master_key, api_secret });
     }
 
-    // 2. Otherwise read from worker storage (after migration)
-    if let Some(key_bytes) = storage::get_worker(MASTER_KEY_STORAGE_KEY)? {
-        let key_hex = String::from_utf8(key_bytes)
-            .map_err(|e| format!("Invalid master key encoding in storage: {}", e))?;
-        return crypto::parse_private_key(&key_hex);
+    // 2. No env secrets - read from storage (single read for both values)
+    if let Some(config_bytes) = storage::get_worker(CONFIG_STORAGE_KEY)? {
+        let stored: StoredConfig = serde_json::from_slice(&config_bytes)
+            .map_err(|e| format!("Invalid config JSON in storage: {}", e))?;
+        let master_key = crypto::parse_private_key(&stored.master_key)?;
+        return Ok(RuntimeConfig {
+            master_key,
+            api_secret: stored.api_secret,
+        });
     }
 
-    // 3. Not found
+    // 3. Not found anywhere
     Err("Master key not configured. Run migrate_master_key action or enable secrets.".into())
 }
 
 /// Handle migrate_master_key action
-/// Migrates master key from env (secrets) to worker-encrypted storage
-/// Only works if:
-/// 1. PROTECTED_MASTER_KEY exists in env (via secrets)
-/// 2. Key is NOT already in storage (prevents overwrite)
+/// Migrates master key AND api_secret from env (secrets) to worker-encrypted storage
+/// Stores both in a single JSON object for optimized reads (1 storage call instead of 2)
 fn handle_migrate_master_key() -> Result<Response, Box<dyn std::error::Error>> {
-    // 1. Check that key exists in env (must be running with secrets)
-    let key_from_env = std::env::var("PROTECTED_MASTER_KEY")
-        .map_err(|_| "PROTECTED_MASTER_KEY not found in env. Run with secrets enabled.")?;
-
-    // 2. Check that key is NOT already in storage (prevent overwrite)
-    let storage_key = format!("@worker:{}", MASTER_KEY_STORAGE_KEY);
-    if storage::has(&storage_key) {
-        return Err("Master key already exists in storage. Migration not needed.".into());
+    // Check if config already exists in storage (cannot be overwritten!)
+    if let Some(config_bytes) = storage::get_worker(CONFIG_STORAGE_KEY)? {
+        // Already migrated - return existing pubkey
+        let config: StoredConfig = serde_json::from_slice(&config_bytes)
+            .map_err(|e| format!("Invalid config JSON in storage: {}", e))?;
+        let privkey = crypto::parse_private_key(&config.master_key)?;
+        let pubkey = crypto::get_master_pubkey(&privkey);
+        return Ok(Response::MigrateMasterKey(MigrateMasterKeyResponse {
+            success: true,
+            pubkey,
+            message: "Config already in storage. Migration not needed.".to_string(),
+        }));
     }
 
-    // 3. Validate the key
-    let privkey = crypto::parse_private_key(&key_from_env)?;
+    // Get values from env
+    let master_key_from_env = std::env::var("PROTECTED_MASTER_KEY").ok().filter(|s| !s.is_empty());
+    let api_secret_from_env = std::env::var("API_SECRET").ok().filter(|s| !s.is_empty());
 
-    // 4. Save to worker storage (encrypted by OutLayer)
-    storage::set_worker(MASTER_KEY_STORAGE_KEY, key_from_env.as_bytes())?;
+    // Need master key to migrate
+    let master_key = master_key_from_env.ok_or(
+        "PROTECTED_MASTER_KEY not found in env. Run with secrets enabled."
+    )?;
 
-    // 5. Return public key for verification
+    // Validate master key and get pubkey
+    let privkey = crypto::parse_private_key(&master_key)?;
     let pubkey = crypto::get_master_pubkey(&privkey);
+
+    // Create combined config
+    let config = StoredConfig {
+        master_key,
+        api_secret: api_secret_from_env.clone(),
+    };
+
+    // Store as JSON (single storage write)
+    let config_json = serde_json::to_vec(&config)?;
+    storage::set_worker(CONFIG_STORAGE_KEY, &config_json)?;
+
+    let message = if api_secret_from_env.is_some() {
+        "Config migrated (master_key + api_secret). Future runs don't need secrets."
+    } else {
+        "Config migrated (master_key only). Future runs don't need secrets."
+    };
 
     Ok(Response::MigrateMasterKey(MigrateMasterKeyResponse {
         success: true,
         pubkey,
-        message: "Master key migrated to worker storage. Future runs don't need secrets.".to_string(),
+        message: message.to_string(),
     }))
 }
 
@@ -121,13 +167,16 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
     let input: Request = serde_json::from_slice(&raw_input)
         .map_err(|e| format!("Failed to parse input: {}. Raw: {}", e, raw_str))?;
 
-    // Handle MigrateMasterKey before getting master key (it needs special logic)
+    // Handle MigrateMasterKey before loading config (it needs special logic)
     if matches!(input, Request::MigrateMasterKey) {
         return handle_migrate_master_key();
     }
 
-    // Get master private key from storage or env
-    let master_privkey = get_master_key()?;
+    // Load config: env first (if secrets enabled), then storage (after migration)
+    // Single storage read for both master_key and api_secret
+    let config = load_config()?;
+    let master_privkey = config.master_key;
+    let api_secret = config.api_secret;
 
     // Use hardcoded database API URL
     let db_api_url = DATABASE_API_URL;
@@ -162,18 +211,18 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
 
             // Fetch and decrypt emails with size limit
-            let (email_data, inbox_next, sent_next) = fetch_combined_emails(
+            let result = fetch_request_email(
                 db_api_url,
                 &account_id,
                 &user_privkey,
-                &master_privkey,
                 max_size,
                 inbox_offset.unwrap_or(0),
                 sent_offset.unwrap_or(0),
+                api_secret.as_deref(),
             )?;
 
             // Serialize and encrypt
-            let data_json = serde_json::to_vec(&email_data)?;
+            let data_json = serde_json::to_vec(&result.email_data)?;
             let encrypted = ecies::encrypt(&ephemeral_pubkey_bytes, &data_json)
                 .map_err(|e| format!("Failed to encrypt response: {}", e))?;
 
@@ -184,15 +233,17 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 success: true,
                 encrypted_data: STANDARD.encode(&encrypted),
                 send_pubkey: hex::encode(&send_pubkey),
-                inbox_next_offset: inbox_next,
-                sent_next_offset: sent_next,
+                inbox_next_offset: result.inbox_next,
+                sent_next_offset: result.sent_next,
+                inbox_count: result.inbox_count,
+                sent_count: result.sent_count,
             }))
         }
 
         Request::SendEmail {
             encrypted_data,
             ephemeral_pubkey,
-            max_output_size,
+            max_output_size: _, // Not used - we return empty EmailData, frontend refreshes separately
         } => {
             use base64::{engine::general_purpose::STANDARD, Engine};
 
@@ -201,7 +252,6 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             let account_id = get_signer()?;
             eprintln!("[DEBUG] SendEmail: account_id={}", account_id);
 
-            let max_size = max_output_size.unwrap_or(DEFAULT_MAX_OUTPUT_SIZE);
             let ephemeral_pubkey_bytes = hex::decode(&ephemeral_pubkey)
                 .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?;
 
@@ -219,9 +269,9 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 .map_err(|e| format!("Invalid encrypted_data base64: {}", e))?;
             eprintln!("[DEBUG] SendEmail: ciphertext len={}", ciphertext.len());
 
-            eprintln!("[DEBUG] SendEmail: decrypting ECIES...");
+            eprintln!("[DEBUG] SendEmail: decrypting EC01...");
             let decrypted_bytes = crypto::decrypt_email(&user_privkey, &ciphertext)?;
-            eprintln!("[DEBUG] SendEmail: decrypted len={}", decrypted_bytes.len());
+            eprintln!("[DEBUG] SendEmail: decrypted, len={}", decrypted_bytes.len());
 
             let decrypted_json = String::from_utf8(decrypted_bytes)
                 .map_err(|e| format!("Invalid UTF-8 in encrypted_data: {}", e))?;
@@ -255,7 +305,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             };
 
             eprintln!("[DEBUG] SendEmail: building email content...");
-            // Build email content (with or without attachments)
+            // Build email content (with or without attachments) - MIME format for actual sending
             let email_content = build_email_content(
                 &sender_email,
                 &to,
@@ -265,12 +315,32 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             );
             eprintln!("[DEBUG] SendEmail: email_content len={}", email_content.len());
 
-            // Encrypt email for sender's sent folder
+            // Generate UUID for sent email (needed before storing attachments)
+            let sent_email_id = uuid::Uuid::new_v4().to_string();
+            eprintln!("[DEBUG] SendEmail: generated sent_email_id={}", sent_email_id);
+
+            // Build sent folder content with lazy attachments (stores large attachments separately)
+            eprintln!("[DEBUG] SendEmail: building sent email with lazy attachments...");
+            let sent_result = build_sent_email_with_lazy_attachments(
+                db_api_url,
+                &sent_email_id,
+                &account_id,
+                &master_privkey,
+                &sender_email,
+                &to,
+                &subject,
+                &body_with_sig,
+                &attachments,
+                api_secret.as_deref(),
+            )?;
+            eprintln!("[DEBUG] SendEmail: sent_content len={}", sent_result.json_content.len());
+
+            // Encrypt sent content for sender's sent folder
             eprintln!("[DEBUG] SendEmail: encrypting for sender...");
             let encrypted_for_sender = crypto::encrypt_for_account(
                 &master_privkey,
                 &account_id,
-                email_content.as_bytes(),
+                sent_result.json_content.as_bytes(),
             )?;
             eprintln!("[DEBUG] SendEmail: encrypted_for_sender len={}", encrypted_for_sender.len());
 
@@ -293,10 +363,11 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                     &recipient_account,
                     &sender_email,
                     &encrypted,
+                    api_secret.as_deref(),
                 )?;
                 eprintln!("[DEBUG] SendEmail: stored, email_id={}", email_id);
 
-                // Store in sender's sent folder
+                // Store in sender's sent folder with pre-generated ID
                 eprintln!("[DEBUG] SendEmail: storing sent email...");
                 let _ = db::store_sent_email(
                     db_api_url,
@@ -304,6 +375,8 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                     &to,
                     &encrypted_for_sender,
                     tx_hash.as_deref(),
+                    Some(&sent_email_id),
+                    api_secret.as_deref(),
                 );
                 eprintln!("[DEBUG] SendEmail: stored sent");
 
@@ -319,10 +392,11 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                     &subject,
                     &body_with_sig,
                     &attachments,
+                    api_secret.as_deref(),
                 )?;
                 eprintln!("[DEBUG] SendEmail: sent external email");
 
-                // Store in sender's sent folder
+                // Store in sender's sent folder with pre-generated ID
                 eprintln!("[DEBUG] SendEmail: storing sent email...");
                 let _ = db::store_sent_email(
                     db_api_url,
@@ -330,26 +404,49 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                     &to,
                     &encrypted_for_sender,
                     tx_hash.as_deref(),
+                    Some(&sent_email_id),
+                    api_secret.as_deref(),
                 );
                 eprintln!("[DEBUG] SendEmail: stored sent");
 
                 None
             };
 
-            // Fetch fresh inbox/sent preview after sending
-            let (email_data, _, _) = fetch_combined_emails(
+            // Fetch all emails (inbox + sent) with lazy loading
+            // Now that sent emails use lazy attachments, response should be within size limit
+            let max_size = DEFAULT_MAX_OUTPUT_SIZE;
+            let mut result = fetch_request_email(
                 db_api_url,
                 &account_id,
                 &user_privkey,
-                &master_privkey,
                 max_size,
-                0, // Fresh from start
                 0,
+                0,
+                api_secret.as_deref(),
             )?;
 
-            let data_json = serde_json::to_vec(&email_data)?;
+            // Check if just-sent email is already in the fetched results
+            // (might not be due to timing - we just stored it)
+            let sent_email_exists = result.email_data.sent.iter().any(|e| e.id == sent_email_id);
+            if !sent_email_exists {
+                // Add the just-sent email to the beginning of sent list
+                let sent_email = SentEmail {
+                    id: sent_email_id.clone(),
+                    to: to.clone(),
+                    subject: subject.clone(),
+                    body: body_with_sig.clone(),
+                    tx_hash: tx_hash.clone(),
+                    sent_at: get_current_timestamp(),
+                    attachments: sent_result.attachments,
+                };
+                result.email_data.sent.insert(0, sent_email);
+            }
+
+            let data_json = serde_json::to_vec(&result.email_data)?;
             let encrypted = ecies::encrypt(&ephemeral_pubkey_bytes, &data_json)
                 .map_err(|e| format!("Failed to encrypt response: {}", e))?;
+
+            eprintln!("[DEBUG] SendEmail: returning success response with all emails");
 
             Ok(Response::SendEmail(SendEmailResponse {
                 success: true,
@@ -371,23 +468,23 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?;
 
             // Delete email from database
-            let deleted = db::delete_email(db_api_url, &email_id, &account_id)?;
+            let deleted = db::delete_email(db_api_url, &email_id, &account_id, api_secret.as_deref())?;
 
             // Derive user's private key for decryption
             let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
 
             // Fetch fresh inbox/sent preview after deleting
-            let (email_data, _, _) = fetch_combined_emails(
+            let result = fetch_request_email(
                 db_api_url,
                 &account_id,
                 &user_privkey,
-                &master_privkey,
                 max_size,
                 0,
                 0,
+                api_secret.as_deref(),
             )?;
 
-            let data_json = serde_json::to_vec(&email_data)?;
+            let data_json = serde_json::to_vec(&result.email_data)?;
             let encrypted = ecies::encrypt(&ephemeral_pubkey_bytes, &data_json)
                 .map_err(|e| format!("Failed to encrypt response: {}", e))?;
 
@@ -401,13 +498,13 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
         Request::GetEmailCount => {
             let account_id = get_signer()?;
 
-            let inbox_count = db::count_emails(db_api_url, &account_id)?;
-            let sent_count = db::count_sent_emails(db_api_url, &account_id)?;
+            // Use request_email with limit=0 to get only counts (no emails fetched)
+            let result = db::request_email(db_api_url, &account_id, 0, 0, 0, 0, api_secret.as_deref())?;
 
             Ok(Response::GetEmailCount(GetEmailCountResponse {
                 success: true,
-                inbox_count,
-                sent_count,
+                inbox_count: result.inbox_count,
+                sent_count: result.sent_count,
             }))
         }
 
@@ -438,6 +535,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 db_api_url,
                 &attachment_id,
                 &account_id,
+                api_secret.as_deref(),
             )?;
 
             // Decrypt attachment data
@@ -461,43 +559,48 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
     }
 }
 
+/// Fetch result with counts
+struct FetchResult {
+    email_data: EmailData,
+    inbox_next: Option<i64>,
+    sent_next: Option<i64>,
+    inbox_count: i64,
+    sent_count: i64,
+}
+
 /// Fetch combined inbox + sent emails with size limit
-/// Returns (EmailData, inbox_next_offset, sent_next_offset)
-/// Large attachments (>= 2KB) are stored separately for lazy loading
-fn fetch_combined_emails(
+/// Returns FetchResult with emails, next offsets, and total counts
+/// Attachments are lazy-loaded by ID (stored by SMTP server)
+fn fetch_request_email(
     api_url: &str,
     account_id: &str,
     user_privkey: &libsecp256k1::SecretKey,
-    master_privkey: &libsecp256k1::SecretKey,
     max_size: usize,
     inbox_offset: i64,
     sent_offset: i64,
-) -> Result<(EmailData, Option<i64>, Option<i64>), Box<dyn std::error::Error>> {
+    api_secret: Option<&str>,
+) -> Result<FetchResult, Box<dyn std::error::Error>> {
     // Reserve some space for JSON overhead and encryption
     let effective_max = max_size.saturating_sub(10_000);
     let mut current_size: usize = 0;
 
-    // Fetch inbox emails
-    let encrypted_inbox = db::fetch_emails(api_url, account_id, 100, inbox_offset)?;
+    // Fetch both inbox and sent emails in a single HTTP request (includes counts)
+    let combined = db::request_email(api_url, account_id, 100, inbox_offset, 100, sent_offset, api_secret)?;
+    let inbox_count = combined.inbox_count;
+    let sent_count = combined.sent_count;
+
     let mut inbox_emails = Vec::new();
     let mut inbox_next: Option<i64> = None;
 
-    for (idx, enc_email) in encrypted_inbox.into_iter().enumerate() {
+    for (idx, enc_email) in combined.inbox.into_iter().enumerate() {
         match crypto::decrypt_email(user_privkey, &enc_email.encrypted_data) {
             Ok(decrypted) => {
                 let parsed = parse_email(&decrypted)?;
 
-                // Process attachments with lazy loading for large ones
-                let attachments = process_attachments(
-                    parsed.raw_attachments,
-                    api_url,
-                    &enc_email.id,
-                    "inbox",
-                    account_id,
-                    master_privkey,
-                );
+                // Attachments are already processed by SMTP, just use them directly
+                let attachments = parsed.attachments;
 
-                // Calculate email size (lazy attachments only add metadata size)
+                // Calculate email size (all attachments are lazy, only metadata counts)
                 let attachments_size: usize = attachments.iter()
                     .map(|a| {
                         let base = a.filename.len() + a.content_type.len() + 50;
@@ -566,27 +669,19 @@ fn fetch_combined_emails(
         inbox_next = Some(inbox_offset + 100);
     }
 
-    // Fetch sent emails (if still under size limit)
-    let encrypted_sent = db::fetch_sent_emails(api_url, account_id, 100, sent_offset)?;
+    // Process sent emails (already fetched in combined request)
     let mut sent_emails = Vec::new();
     let mut sent_next: Option<i64> = None;
 
-    for (idx, enc_email) in encrypted_sent.into_iter().enumerate() {
+    for (idx, enc_email) in combined.sent.into_iter().enumerate() {
         match crypto::decrypt_email(user_privkey, &enc_email.encrypted_data) {
             Ok(decrypted) => {
                 let parsed = parse_email(&decrypted)?;
 
-                // Process attachments with lazy loading for large ones
-                let attachments = process_attachments(
-                    parsed.raw_attachments,
-                    api_url,
-                    &enc_email.id,
-                    "sent",
-                    account_id,
-                    master_privkey,
-                );
+                // Attachments are already processed, just use them directly
+                let attachments = parsed.attachments;
 
-                // Calculate email size (lazy attachments only add metadata size)
+                // Calculate email size (all attachments are lazy, only metadata counts)
                 let attachments_size: usize = attachments.iter()
                     .map(|a| {
                         let base = a.filename.len() + a.content_type.len() + 50;
@@ -655,208 +750,139 @@ fn fetch_combined_emails(
         sent_next = Some(sent_offset + 100);
     }
 
-    Ok((
-        EmailData {
+    Ok(FetchResult {
+        email_data: EmailData {
             inbox: inbox_emails,
             sent: sent_emails,
         },
         inbox_next,
         sent_next,
-    ))
+        inbox_count,
+        sent_count,
+    })
 }
 
-/// Parse decrypted email content including raw attachments
-fn parse_email(data: &[u8]) -> Result<ParsedEmail, Box<dyn std::error::Error>> {
-    let parsed = mailparse::parse_mail(data)?;
-
-    let subject = parsed
-        .headers
-        .iter()
-        .find(|h| h.get_key().eq_ignore_ascii_case("subject"))
-        .map(|h| h.get_value())
-        .unwrap_or_default();
-
-    let body = if parsed.subparts.is_empty() {
-        parsed.get_body()?
-    } else {
-        find_body_part(&parsed).unwrap_or_default()
-    };
-
-    // Extract raw attachments (will be processed for lazy loading later)
-    let mut raw_attachments = Vec::new();
-    extract_attachments_raw(&parsed, &mut raw_attachments);
-
-    Ok(ParsedEmail { subject, body, raw_attachments })
+/// JSON format for emails (outlayer-email)
+#[derive(Debug, serde::Deserialize)]
+struct EmailJson {
+    format: String,
+    subject: String,
+    body: String,
+    #[serde(default)]
+    attachments: Vec<AttachmentJson>,
 }
 
-/// Recursively find text body in email parts
-fn find_body_part(mail: &mailparse::ParsedMail) -> Option<String> {
-    let ctype = mail.ctype.mimetype.to_lowercase();
-    if ctype.starts_with("text/plain") || ctype.starts_with("text/html") {
-        if let Ok(body) = mail.get_body() {
-            if !body.trim().is_empty() {
-                return Some(body);
-            }
-        }
-    }
-
-    for part in &mail.subparts {
-        if let Some(body) = find_body_part(part) {
-            return Some(body);
-        }
-    }
-
-    None
-}
-
-/// Raw attachment data before lazy loading processing
-struct RawAttachment {
+#[derive(Debug, serde::Deserialize)]
+struct AttachmentJson {
+    id: String,
     filename: String,
     content_type: String,
-    data: Vec<u8>,
     size: usize,
 }
 
-/// Recursively extract raw attachments from email parts
-fn extract_attachments_raw(mail: &mailparse::ParsedMail, attachments: &mut Vec<RawAttachment>) {
-    // Check Content-Disposition header for attachment
-    let disposition = mail.headers
-        .iter()
-        .find(|h| h.get_key().eq_ignore_ascii_case("content-disposition"))
-        .map(|h| h.get_value().to_lowercase());
+/// Parse decrypted email content (outlayer-email format)
+fn parse_email(data: &[u8]) -> Result<ParsedEmail, Box<dyn std::error::Error>> {
+    let json: EmailJson = serde_json::from_slice(data)
+        .map_err(|e| format!("Invalid JSON: {}", e))?;
 
-    let is_attachment = disposition.as_ref().map(|d| d.starts_with("attachment")).unwrap_or(false);
-    let is_inline_file = disposition.as_ref().map(|d| d.starts_with("inline")).unwrap_or(false);
-
-    // Get filename from Content-Disposition or Content-Type
-    let filename = mail.ctype.params.get("name")
-        .cloned()
-        .or_else(|| {
-            // Try to extract filename from Content-Disposition
-            if let Some(disp) = &disposition {
-                if let Some(start) = disp.find("filename=") {
-                    let rest = &disp[start + 9..];
-                    let name = rest.trim_start_matches('"').split('"').next()
-                        .or_else(|| rest.split(';').next())
-                        .map(|s| s.trim().to_string());
-                    return name;
-                }
-            }
-            None
-        });
-
-    let content_type = &mail.ctype.mimetype;
-
-    // Include as attachment if:
-    // 1. Has Content-Disposition: attachment, OR
-    // 2. Has a filename and is not text/plain or text/html body
-    let should_include = is_attachment ||
-        (filename.is_some() && !content_type.starts_with("text/plain") && !content_type.starts_with("text/html")) ||
-        (is_inline_file && filename.is_some() && content_type.starts_with("image/"));
-
-    if should_include {
-        if let Ok(body_bytes) = mail.get_body_raw() {
-            let size = body_bytes.len();
-            let fname = filename.unwrap_or_else(|| "attachment".to_string());
-
-            attachments.push(RawAttachment {
-                filename: fname,
-                content_type: content_type.clone(),
-                data: body_bytes,
-                size,
-            });
-        }
+    if json.format != "outlayer-email" {
+        return Err(format!("Unknown format: {} (expected outlayer-email)", json.format).into());
     }
 
-    // Recurse into subparts
-    for part in &mail.subparts {
-        extract_attachments_raw(part, attachments);
-    }
+    let attachments = json.attachments.into_iter().map(|att| types::Attachment {
+        filename: att.filename,
+        content_type: att.content_type,
+        data: None,
+        size: att.size,
+        attachment_id: Some(att.id),
+    }).collect();
+
+    Ok(ParsedEmail {
+        subject: json.subject,
+        body: json.body,
+        attachments,
+    })
 }
 
-/// Process raw attachments: small ones are inlined, large ones are stored for lazy loading
-fn process_attachments(
-    raw_attachments: Vec<RawAttachment>,
+/// Result of building sent email content with lazy attachments
+struct SentEmailContent {
+    /// JSON string to be encrypted and stored
+    json_content: String,
+    /// Processed attachments with lazy loading info (for immediate response)
+    attachments: Vec<types::Attachment>,
+}
+
+/// Build sent email content - stores attachments separately via db-api
+fn build_sent_email_with_lazy_attachments(
     api_url: &str,
     email_id: &str,
-    folder: &str,
-    recipient: &str,
+    account_id: &str,
     master_privkey: &libsecp256k1::SecretKey,
-) -> Vec<types::Attachment> {
+    _from: &str,
+    _to: &str,
+    subject: &str,
+    body: &str,
+    attachments: &[Attachment],
+    api_secret: Option<&str>,
+) -> Result<SentEmailContent, Box<dyn std::error::Error>> {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    use types::ATTACHMENT_LAZY_THRESHOLD;
 
-    let mut result = Vec::new();
+    let mut json_attachments = Vec::new();
+    let mut result_attachments = Vec::new();
 
-    for raw in raw_attachments {
-        if raw.size < ATTACHMENT_LAZY_THRESHOLD {
-            // Small attachment - include inline
-            result.push(types::Attachment {
-                filename: raw.filename,
-                content_type: raw.content_type,
-                data: Some(STANDARD.encode(&raw.data)),
-                size: raw.size,
-                attachment_id: None,
-            });
-        } else {
-            // Large attachment - store for lazy loading
-            // Encrypt attachment data with recipient's key
-            match crypto::encrypt_for_account(master_privkey, recipient, &raw.data) {
-                Ok(encrypted) => {
-                    match db::store_attachment(
-                        api_url,
-                        email_id,
-                        folder,
-                        recipient,
-                        &raw.filename,
-                        &raw.content_type,
-                        raw.size,
-                        &encrypted,
-                    ) {
-                        Ok(attachment_id) => {
-                            result.push(types::Attachment {
-                                filename: raw.filename,
-                                content_type: raw.content_type,
-                                data: None,
-                                size: raw.size,
-                                attachment_id: Some(attachment_id),
-                            });
-                        }
-                        Err(e) => {
-                            // Failed to store - include inline as fallback
-                            eprintln!("Failed to store attachment for lazy loading: {}", e);
-                            result.push(types::Attachment {
-                                filename: raw.filename,
-                                content_type: raw.content_type,
-                                data: Some(STANDARD.encode(&raw.data)),
-                                size: raw.size,
-                                attachment_id: None,
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Failed to encrypt - include inline as fallback
-                    eprintln!("Failed to encrypt attachment: {}", e);
-                    result.push(types::Attachment {
-                        filename: raw.filename,
-                        content_type: raw.content_type,
-                        data: Some(STANDARD.encode(&raw.data)),
-                        size: raw.size,
-                        attachment_id: None,
-                    });
-                }
-            }
-        }
+    for att in attachments {
+        let data_bytes = match &att.data {
+            Some(b64) => STANDARD.decode(b64)?,
+            None => continue,
+        };
+
+        // Always store attachments separately (same as SMTP)
+        let encrypted = crypto::encrypt_for_account(master_privkey, account_id, &data_bytes)?;
+
+        let att_id = db::store_attachment(
+            api_url,
+            email_id,
+            "sent",
+            account_id,
+            &att.filename,
+            &att.content_type,
+            att.size,
+            &encrypted,
+            api_secret,
+        )?;
+
+        json_attachments.push(serde_json::json!({
+            "id": att_id,
+            "filename": att.filename,
+            "content_type": att.content_type,
+            "size": att.size
+        }));
+        result_attachments.push(types::Attachment {
+            filename: att.filename.clone(),
+            content_type: att.content_type.clone(),
+            data: None,
+            size: att.size,
+            attachment_id: Some(att_id),
+        });
     }
 
-    result
+    let email_json = serde_json::json!({
+        "format": "outlayer-email",
+        "subject": subject,
+        "body": body,
+        "attachments": json_attachments
+    });
+
+    Ok(SentEmailContent {
+        json_content: email_json.to_string(),
+        attachments: result_attachments,
+    })
 }
 
 struct ParsedEmail {
     subject: String,
     body: String,
-    raw_attachments: Vec<RawAttachment>,
+    attachments: Vec<types::Attachment>,
 }
 
 /// Validate that account_id is allowed to send emails
@@ -961,6 +987,57 @@ fn rand_u64() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     now.as_nanos() as u64 ^ 0xDEADBEEF
+}
+
+/// Get current timestamp in ISO 8601 format
+fn get_current_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+
+    // Convert to date/time components (simplified UTC)
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+
+    // Calculate year/month/day from days since epoch (1970-01-01)
+    let mut y = 1970;
+    let mut remaining_days = days as i64;
+
+    loop {
+        let days_in_year = if is_leap_year(y) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        y += 1;
+    }
+
+    let days_in_months = if is_leap_year(y) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut m = 1;
+    for days_in_month in days_in_months.iter() {
+        if remaining_days < *days_in_month {
+            break;
+        }
+        remaining_days -= days_in_month;
+        m += 1;
+    }
+    let d = remaining_days + 1;
+
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hours, minutes, seconds)
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 /// Insert signature before quoted text markers
