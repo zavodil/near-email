@@ -341,6 +341,9 @@ struct StoreSentEmailBody {
     #[serde(with = "base64_serde_de")]
     encrypted_data: Vec<u8>,
     tx_hash: Option<String>,
+    /// Optional client-provided ID (for pre-storing attachments with consistent email_id)
+    #[serde(default)]
+    id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -943,7 +946,11 @@ async fn store_sent_email(
     State(state): State<Arc<AppState>>,
     Json(body): Json<StoreSentEmailBody>,
 ) -> Result<Json<StoreSentResponse>, StatusCode> {
-    let id = Uuid::new_v4();
+    // Use client-provided ID if valid UUID, otherwise generate new one
+    let id = match &body.id {
+        Some(id_str) => Uuid::parse_str(id_str).unwrap_or_else(|_| Uuid::new_v4()),
+        None => Uuid::new_v4(),
+    };
 
     sqlx::query(
         r#"

@@ -84,6 +84,7 @@ services:
         NEXT_PUBLIC_PROJECT_ID: ${NEXT_PUBLIC_PROJECT_ID:-zavodil2.testnet/near-email}
         NEXT_PUBLIC_SECRETS_PROFILE: ${NEXT_PUBLIC_SECRETS_PROFILE:-default}
         NEXT_PUBLIC_SECRETS_ACCOUNT_ID: ${NEXT_PUBLIC_SECRETS_ACCOUNT_ID:-zavodil2.testnet}
+        NEXT_PUBLIC_USE_SECRETS: ${NEXT_PUBLIC_USE_SECRETS:-false}
     ports:
       - "3000:3000"
 
