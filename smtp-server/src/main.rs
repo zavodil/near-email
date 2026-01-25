@@ -41,6 +41,8 @@ async fn main() -> Result<()> {
     let email_domain = env::var("EMAIL_DOMAIN").unwrap_or_else(|_| "near.email".to_string());
     let default_account_suffix = env::var("DEFAULT_ACCOUNT_SUFFIX")
         .unwrap_or_else(|_| ".near".to_string());
+    let db_api_url = env::var("DB_API_URL")
+        .expect("DB_API_URL must be set (e.g., http://db-api:8080)");
 
     // Parse master public key
     let master_pubkey = crypto::parse_public_key(&master_pubkey_hex)
@@ -60,6 +62,8 @@ async fn main() -> Result<()> {
     // Run migrations
     db::run_migrations(&db_pool).await?;
 
+    info!("DB API URL: {}", db_api_url);
+
     // Create handler with Tokio runtime handle
     // (mailin_embedded runs in a separate thread pool, needs handle for async DB ops)
     let handler = handler::NearEmailHandler::new(
@@ -68,6 +72,7 @@ async fn main() -> Result<()> {
         email_domain,
         default_account_suffix,
         tokio::runtime::Handle::current(),
+        db_api_url,
     );
 
     // Start SMTP server

@@ -18,6 +18,10 @@ serde_json = "1.0"
 
 # HTTP client for WASI P2
 wasi-http-client = "0.2"
+# URL parsing for chunked HTTP client
+url = "2.5"
+# Raw WASI bindings for chunked writes (bypasses 4KB limit)
+wasi = "0.13"
 
 # Cryptography - pure Rust implementations for WASI compatibility
 # Note: Using libsecp256k1 (pure Rust) instead of secp256k1 (C bindings)
@@ -34,8 +38,8 @@ ed25519-dalek = "2.1"
 bs58 = "0.5"
 base64 = "0.21"
 
-# Email parsing
-mailparse = "0.15"
+# UUID generation for sent email IDs
+uuid = { version = "1.0", features = ["v4"] }
 
 [profile.release]
 opt-level = "z"        # Optimize for size (more aggressive than "s")

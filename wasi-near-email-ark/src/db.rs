@@ -49,6 +49,8 @@ pub fn send_email(
 }
 
 /// Send email with attachments via SMTP relay
+///
+/// Uses chunked HTTP writes to bypass the 4KB limit in wasi-http's blocking_write_and_flush
 pub fn send_email_with_attachments(
     api_url: &str,
     from_account: &str,
@@ -58,6 +60,7 @@ pub fn send_email_with_attachments(
     attachments: &[crate::types::Attachment],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let url = format!("{}/send", api_url);
+    eprintln!("[send_email] url={}, attachments={}", url, attachments.len());
 
     let payload = serde_json::json!({
         "from_account": from_account,
@@ -68,15 +71,21 @@ pub fn send_email_with_attachments(
     });
 
     let body_data = serde_json::to_vec(&payload)?;
-    let response = Client::new()
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .body(&body_data)
-        .connect_timeout(TIMEOUT)
-        .send()?;
+    eprintln!("[send_email] body_len={} bytes ({} KB)", body_data.len(), body_data.len() / 1024);
+
+    // Use chunked HTTP client for large bodies (bypasses 4KB limit)
+    let response = crate::http_chunked::post_chunked(
+        &url,
+        "application/json",
+        &body_data,
+        TIMEOUT,
+    )?;
+
+    eprintln!("[send_email] response status={}", response.status());
 
     if response.status() != 200 {
-        return Err(format!("Send email failed: {}", response.status()).into());
+        let body_str = String::from_utf8_lossy(response.body());
+        return Err(format!("Send email failed: {} - {}", response.status(), body_str).into());
     }
 
     Ok(())
@@ -153,20 +162,21 @@ pub fn store_internal_email(
     });
 
     let body_data = serde_json::to_vec(&payload)?;
-    let response = Client::new()
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .body(&body_data)
-        .connect_timeout(TIMEOUT)
-        .send()?;
+
+    // Use chunked HTTP for large bodies
+    let response = crate::http_chunked::post_chunked(
+        &url,
+        "application/json",
+        &body_data,
+        TIMEOUT,
+    )?;
 
     if response.status() != 200 {
         return Err(format!("Store internal email failed: {}", response.status()).into());
     }
 
     // Parse response to get the email ID
-    let body = response.body()?;
-    let result: serde_json::Value = serde_json::from_slice(&body)?;
+    let result: serde_json::Value = serde_json::from_slice(response.body())?;
     let id = result["id"].as_str().unwrap_or("unknown").to_string();
 
     Ok(id)
@@ -200,12 +210,15 @@ pub fn fetch_sent_emails(
 }
 
 /// Store sent email (already encrypted)
+/// If `email_id` is provided, the database will use it; otherwise it generates a new UUID.
+/// This is used for lazy attachment support where we need to pre-store attachments with the email_id.
 pub fn store_sent_email(
     api_url: &str,
     sender: &str,
     recipient_email: &str,
     encrypted_data: &[u8],
     tx_hash: Option<&str>,
+    email_id: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     use base64::{engine::general_purpose::STANDARD, Engine};
 
@@ -216,22 +229,24 @@ pub fn store_sent_email(
         "recipient_email": recipient_email,
         "encrypted_data": STANDARD.encode(encrypted_data),
         "tx_hash": tx_hash,
+        "id": email_id,
     });
 
     let body_data = serde_json::to_vec(&payload)?;
-    let response = Client::new()
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .body(&body_data)
-        .connect_timeout(TIMEOUT)
-        .send()?;
+
+    // Use chunked HTTP for large bodies
+    let response = crate::http_chunked::post_chunked(
+        &url,
+        "application/json",
+        &body_data,
+        TIMEOUT,
+    )?;
 
     if response.status() != 200 {
         return Err(format!("Store sent email failed: {}", response.status()).into());
     }
 
-    let body = response.body()?;
-    let result: DbStoreSentResponse = serde_json::from_slice(&body)?;
+    let result: DbStoreSentResponse = serde_json::from_slice(response.body())?;
 
     Ok(result.id)
 }
@@ -284,19 +299,20 @@ pub fn store_attachment(
     });
 
     let body_data = serde_json::to_vec(&payload)?;
-    let response = Client::new()
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .body(&body_data)
-        .connect_timeout(TIMEOUT)
-        .send()?;
+
+    // Use chunked HTTP for large bodies (attachments can be big)
+    let response = crate::http_chunked::post_chunked(
+        &url,
+        "application/json",
+        &body_data,
+        TIMEOUT,
+    )?;
 
     if response.status() != 200 {
         return Err(format!("Store attachment failed: {}", response.status()).into());
     }
 
-    let body = response.body()?;
-    let result: crate::types::DbStoreAttachmentResponse = serde_json::from_slice(&body)?;
+    let result: crate::types::DbStoreAttachmentResponse = serde_json::from_slice(response.body())?;
 
     Ok(result.id)
 }

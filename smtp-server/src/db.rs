@@ -73,31 +73,28 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-/// Store encrypted email in database
+/// Store encrypted email in database (with pre-generated ID for attachment references)
 pub async fn store_email(
     pool: &PgPool,
+    id: &Uuid,
     recipient: &str,
     sender_email: &str,
-    subject_hint: Option<&str>,
     encrypted_data: &[u8],
-) -> Result<Uuid> {
-    let id = Uuid::new_v4();
-
+) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO emails (id, recipient, sender_email, subject_hint, encrypted_data)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO emails (id, recipient, sender_email, encrypted_data)
+        VALUES ($1, $2, $3, $4)
         "#,
     )
     .bind(id)
     .bind(recipient)
     .bind(sender_email)
-    .bind(subject_hint)
     .bind(encrypted_data)
     .execute(pool)
     .await?;
 
-    Ok(id)
+    Ok(())
 }
 
 /// Store encrypted sent email in database
