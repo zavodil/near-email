@@ -109,6 +109,10 @@ pub struct GetEmailsResponse {
     /// Next offset for sent (if more emails available)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sent_next_offset: Option<i64>,
+    /// Total count of inbox emails
+    pub inbox_count: i64,
+    /// Total count of sent emails
+    pub sent_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -238,16 +242,6 @@ pub struct EncryptedEmail {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct DbEmailsResponse {
-    pub emails: Vec<EncryptedEmail>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DbCountResponse {
-    pub count: i64,
-}
-
-#[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct DbGenericResponse {
     pub success: bool,
@@ -265,9 +259,13 @@ pub struct EncryptedSentEmail {
     pub sent_at: String,
 }
 
+/// Combined inbox + sent emails response from /request-email endpoint
 #[derive(Debug, Deserialize)]
-pub struct DbSentEmailsResponse {
-    pub emails: Vec<EncryptedSentEmail>,
+pub struct DbRequestEmailResponse {
+    pub inbox: Vec<EncryptedEmail>,
+    pub sent: Vec<EncryptedSentEmail>,
+    pub inbox_count: i64,
+    pub sent_count: i64,
 }
 
 #[derive(Debug, Deserialize)]

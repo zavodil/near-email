@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| ".near".to_string());
     let db_api_url = env::var("DB_API_URL")
         .expect("DB_API_URL must be set (e.g., http://db-api:8080)");
+    let api_secret = env::var("API_SECRET").ok().filter(|s| !s.is_empty());
 
     // Parse master public key
     let master_pubkey = crypto::parse_public_key(&master_pubkey_hex)
@@ -73,6 +74,7 @@ async fn main() -> Result<()> {
         default_account_suffix,
         tokio::runtime::Handle::current(),
         db_api_url,
+        api_secret,
     );
 
     // Start SMTP server

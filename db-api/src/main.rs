@@ -4,8 +4,10 @@
 //! since WASI cannot make direct database connections.
 
 use axum::{
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::StatusCode,
+    middleware::{self, Next},
+    response::Response,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -73,6 +75,8 @@ struct AppState {
     email_signature: Option<String>,
     /// SMTP relay config - if set, use relay instead of direct MX delivery
     smtp_relay: Option<SmtpRelayConfig>,
+    /// API secret for authenticating requests from WASI and SMTP server
+    api_secret: Option<String>,
 }
 
 #[tokio::main]
@@ -172,29 +176,49 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // API secret for authenticating requests (optional but recommended)
+    let api_secret = env::var("API_SECRET").ok().filter(|s| !s.is_empty());
+    if api_secret.is_some() {
+        info!("API_SECRET configured - requests will be authenticated");
+    } else {
+        warn!("API_SECRET not set - API is UNPROTECTED!");
+    }
+
     info!("Email domain: {}, account suffix: {}", email_domain, account_suffix);
 
-    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay };
+    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay, api_secret };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let app = Router::new()
+    let shared_state = Arc::new(state);
+
+    // Protected routes (require API_SECRET)
+    let protected_routes = Router::new()
         .route("/emails", get(get_emails))
         .route("/emails/count", get(count_emails))
         .route("/emails/:id", delete(delete_email))
         .route("/send", post(send_email))
         .route("/internal-store", post(store_internal_email))
         .route("/sent-emails", get(get_sent_emails))
+        .route("/request-email", get(request_email))
         .route("/store-sent", post(store_sent_email))
         .route("/attachments", post(store_attachment))
         .route("/attachments/:id", get(get_attachment))
-        .route("/health", get(health))
+        .layer(middleware::from_fn_with_state(shared_state.clone(), require_api_secret));
+
+    // Public routes (no auth needed)
+    let public_routes = Router::new()
+        .route("/health", get(health));
+
+    let app = Router::new()
+        .merge(protected_routes)
+        .merge(public_routes)
         .layer(cors)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB for large attachments
-        .with_state(Arc::new(state));
+        .with_state(shared_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("Starting DB API on {}", addr);
@@ -203,6 +227,38 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+// ==================== Middleware ====================
+
+/// Middleware to check API secret
+async fn require_api_secret(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    // If no secret configured, allow all requests (but warn was logged at startup)
+    let Some(expected_secret) = &state.api_secret else {
+        return Ok(next.run(req).await);
+    };
+
+    // Check X-API-Secret header
+    let provided_secret = req
+        .headers()
+        .get("X-API-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match provided_secret {
+        Some(secret) if secret == expected_secret => Ok(next.run(req).await),
+        Some(_) => {
+            warn!("Invalid API secret provided");
+            Err(StatusCode::UNAUTHORIZED)
+        }
+        None => {
+            warn!("Missing X-API-Secret header");
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
 }
 
 // ==================== Types ====================
@@ -307,6 +363,28 @@ struct GetSentEmailsQuery {
     limit: i64,
     #[serde(default)]
     offset: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestEmailQuery {
+    /// account_id is used as both recipient (for inbox) and sender (for sent)
+    account_id: String,
+    #[serde(default = "default_limit")]
+    inbox_limit: i64,
+    #[serde(default)]
+    inbox_offset: i64,
+    #[serde(default = "default_limit")]
+    sent_limit: i64,
+    #[serde(default)]
+    sent_offset: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestEmailResponse {
+    inbox: Vec<EmailRecord>,
+    sent: Vec<SentEmailRecord>,
+    inbox_count: i64,
+    sent_count: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -939,6 +1017,88 @@ async fn get_sent_emails(
         .collect();
 
     Ok(Json(SentEmailsResponse { emails }))
+}
+
+/// Get combined inbox and sent emails in a single request
+/// Optimizes round-trip time by fetching emails and counts in parallel DB queries
+async fn request_email(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RequestEmailQuery>,
+) -> Result<Json<RequestEmailResponse>, StatusCode> {
+    // Run all queries in parallel: inbox, sent, inbox_count, sent_count
+    let (inbox_result, sent_result, inbox_count_result, sent_count_result) = tokio::join!(
+        sqlx::query_as::<_, EmailRow>(
+            r#"
+            SELECT id, sender_email, encrypted_data, received_at
+            FROM emails
+            WHERE recipient = $1
+            ORDER BY received_at DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(&query.account_id)
+        .bind(query.inbox_limit)
+        .bind(query.inbox_offset)
+        .fetch_all(&state.db),
+
+        sqlx::query_as::<_, SentEmailRow>(
+            r#"
+            SELECT id, recipient_email, encrypted_data, tx_hash, sent_at
+            FROM sent_emails
+            WHERE sender = $1
+            ORDER BY sent_at DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(&query.account_id)
+        .bind(query.sent_limit)
+        .bind(query.sent_offset)
+        .fetch_all(&state.db),
+
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM emails WHERE recipient = $1")
+            .bind(&query.account_id)
+            .fetch_one(&state.db),
+
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM sent_emails WHERE sender = $1")
+            .bind(&query.account_id)
+            .fetch_one(&state.db)
+    );
+
+    let inbox_rows = inbox_result.map_err(|e| {
+        error!("Failed to get inbox emails: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let sent_rows = sent_result.map_err(|e| {
+        error!("Failed to get sent emails: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let inbox_count = inbox_count_result.map(|r| r.0).unwrap_or(0);
+    let sent_count = sent_count_result.map(|r| r.0).unwrap_or(0);
+
+    let inbox = inbox_rows
+        .into_iter()
+        .map(|row| EmailRecord {
+            id: row.id.to_string(),
+            sender_email: row.sender_email,
+            encrypted_data: row.encrypted_data,
+            received_at: row.received_at.to_rfc3339(),
+        })
+        .collect();
+
+    let sent = sent_rows
+        .into_iter()
+        .map(|row| SentEmailRecord {
+            id: row.id.to_string(),
+            recipient_email: row.recipient_email,
+            encrypted_data: row.encrypted_data,
+            tx_hash: row.tx_hash,
+            sent_at: row.sent_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(RequestEmailResponse { inbox, sent, inbox_count, sent_count }))
 }
 
 /// Store a sent email (already encrypted by WASI module)

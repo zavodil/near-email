@@ -47,6 +47,7 @@ pub struct NearEmailHandler {
     default_account_suffix: String,
     rt_handle: Handle,
     db_api_url: String,
+    api_secret: Option<String>,
     http_client: reqwest::Client,
     // Transaction state
     current_from: Option<String>,
@@ -63,6 +64,7 @@ impl NearEmailHandler {
         default_account_suffix: String,
         rt_handle: Handle,
         db_api_url: String,
+        api_secret: Option<String>,
     ) -> Self {
         Self {
             db_pool,
@@ -71,6 +73,7 @@ impl NearEmailHandler {
             default_account_suffix,
             rt_handle,
             db_api_url,
+            api_secret,
             http_client: reqwest::Client::new(),
             current_from: None,
             current_to: Vec::new(),
@@ -279,11 +282,18 @@ impl NearEmailHandler {
             "encrypted_data": STANDARD.encode(encrypted_data),
         });
 
-        let response = self
+        let mut request = self
             .http_client
             .post(&url)
             .json(&body)
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(30));
+
+        // Add API secret header if configured
+        if let Some(secret) = &self.api_secret {
+            request = request.header("X-API-Secret", secret);
+        }
+
+        let response = request
             .send()
             .await
             .map_err(|e| format!("HTTP error: {}", e))?;

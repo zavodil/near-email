@@ -39,6 +39,7 @@ pub fn post_chunked(
     content_type: &str,
     body: &[u8],
     timeout: Duration,
+    api_secret: Option<&str>,
 ) -> Result<ChunkedResponse, Box<dyn std::error::Error>> {
     eprintln!("[CHUNKED] post_chunked: url={}, body_len={}", url, body.len());
 
@@ -49,6 +50,11 @@ pub fn post_chunked(
     let headers = Headers::new();
     headers.set(&"Content-Type".to_string(), &[content_type.as_bytes().to_vec()])?;
     headers.set(&"Content-Length".to_string(), &[body.len().to_string().into_bytes()])?;
+
+    // Add API secret header if provided
+    if let Some(secret) = api_secret {
+        headers.set(&"X-API-Secret".to_string(), &[secret.as_bytes().to_vec()])?;
+    }
 
     // Create request
     let req = OutgoingRequest::new(headers);
