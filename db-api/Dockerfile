@@ -6,6 +6,7 @@ RUN cargo update home --precise 0.5.9 && \
     cargo update zip --precise 2.2.0 && \
     cargo update time --precise 0.3.36 && \
     cargo update time-core --precise 0.1.2 && \
+    cargo update base64ct --precise 1.6.0 && \
     cargo build --release
 
 FROM debian:bookworm-slim
