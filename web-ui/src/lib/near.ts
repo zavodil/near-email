@@ -763,12 +763,41 @@ interface SignedInviteData {
   nonce: string;      // base64 encoded 32-byte nonce (needed for NEP-413 verification)
 }
 
+// Cached signature storage (valid for 50 minutes, signatures expire at 60 min)
+// Key: accountId, Value: SignedInviteData
+const cachedInviteSignatures: Map<string, SignedInviteData> = new Map();
+const SIGNATURE_CACHE_DURATION_MS = 50 * 60 * 1000; // 50 minutes
+
+// Check if cached signature is still valid
+function getCachedSignature(accountId: string): SignedInviteData | null {
+  const cached = cachedInviteSignatures.get(accountId);
+  if (!cached) return null;
+
+  const age = Date.now() - cached.timestamp_ms;
+  if (age > SIGNATURE_CACHE_DURATION_MS) {
+    // Signature too old, remove from cache
+    cachedInviteSignatures.delete(accountId);
+    return null;
+  }
+
+  return cached;
+}
+
 // Sign a message for invite authentication using wallet (NEP-413)
-// Always requires wallet connection - payment key users must also sign with their wallet
-// Returns signature data or null if signing fails
-async function signInviteMessage(action: string, accountId: string): Promise<SignedInviteData | null> {
+// Message format: "near.email:{accountId}:{timestamp_ms}" (action not included for caching)
+// Caches signature for 50 minutes to avoid repeated wallet popups
+// Returns cached signature if valid, otherwise requests new signature
+async function signInviteMessage(accountId: string): Promise<SignedInviteData | null> {
+  // Check cache first
+  const cached = getCachedSignature(accountId);
+  if (cached) {
+    console.log('Using cached invite signature (age:', Math.round((Date.now() - cached.timestamp_ms) / 1000 / 60), 'min)');
+    return cached;
+  }
+
   const timestamp_ms = Date.now();
-  const message = `near.email:${action}:${accountId}:${timestamp_ms}`;
+  // Simplified message without action - one signature works for all invite operations
+  const message = `near.email:${accountId}:${timestamp_ms}`;
 
   if (!selector) {
     console.error('Wallet selector not initialized');
@@ -814,12 +843,18 @@ async function signInviteMessage(action: string, accountId: string): Promise<Sig
     // Convert nonce to base64
     const nonceBase64 = btoa(String.fromCharCode(...nonceBytes));
 
-    return {
+    const signedData: SignedInviteData = {
       signature: signatureBase64,
       public_key: result.publicKey,
       timestamp_ms,
       nonce: nonceBase64,
     };
+
+    // Cache the signature
+    cachedInviteSignatures.set(accountId, signedData);
+    console.log('New invite signature cached for', accountId);
+
+    return signedData;
   } catch (e) {
     console.error('Wallet signing failed:', e);
     return null;
@@ -850,7 +885,7 @@ export async function useInviteCode(code: string, accountId: string): Promise<Us
 
 // Generate a new invite code (requires signature)
 export async function generateInviteCode(accountId: string): Promise<GenerateInviteResult> {
-  const signed = await signInviteMessage('generate_invite', accountId);
+  const signed = await signInviteMessage(accountId);
   if (!signed) {
     return { success: false, error: 'Failed to sign request. Please connect wallet.' };
   }
@@ -874,7 +909,7 @@ export async function generateInviteCode(accountId: string): Promise<GenerateInv
 
 // Send an invite via email (requires signature)
 export async function sendInviteEmail(accountId: string, recipientEmail: string): Promise<SendInviteResult> {
-  const signed = await signInviteMessage('send_invite', accountId);
+  const signed = await signInviteMessage(accountId);
   if (!signed) {
     return { success: false, error: 'Failed to sign request. Please connect wallet.' };
   }
@@ -899,7 +934,7 @@ export async function sendInviteEmail(accountId: string, recipientEmail: string)
 
 // Get user's invites and status (requires signature, now POST)
 export async function getMyInvites(accountId: string): Promise<MyInvitesResult> {
-  const signed = await signInviteMessage('my_invites', accountId);
+  const signed = await signInviteMessage(accountId);
   if (!signed) {
     throw new Error('Failed to sign request. Please connect wallet.');
   }

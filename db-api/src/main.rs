@@ -1545,8 +1545,9 @@ async fn verify_access_key_owner(
 
 /// Verify ed25519 signature for invite requests using NEP-413 format
 /// NEP-413 specifies that the signed payload is: SHA256(NEP413_TAG || Borsh(Nep413Payload))
+/// Message format: "near.email:{account_id}:{timestamp_ms}" (action not included for caching)
 /// Returns Ok(()) if signature is valid, Err(reason) otherwise
-fn verify_signature_crypto(signed: &SignedRequest, action: &str) -> Result<(), String> {
+fn verify_signature_crypto(signed: &SignedRequest) -> Result<(), String> {
     // Check timestamp (allow 1 hour window)
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     let one_hour_ms = 60 * 60 * 1000;
@@ -1590,10 +1591,10 @@ fn verify_signature_crypto(signed: &SignedRequest, action: &str) -> Result<(), S
     let nonce_array: [u8; 32] = nonce_bytes.try_into()
         .map_err(|_| "Failed to convert nonce to array".to_string())?;
 
-    // Build message
+    // Build message (action not included - one signature works for all invite operations)
     let message = format!(
-        "near.email:{}:{}:{}",
-        action, signed.account_id, signed.timestamp_ms
+        "near.email:{}:{}",
+        signed.account_id, signed.timestamp_ms
     );
 
     // Build NEP-413 payload
@@ -1645,10 +1646,9 @@ async fn verify_signature_with_ownership(
     fastnear_api_url: &str,
     near_rpc_url: Option<&str>,
     signed: &SignedRequest,
-    action: &str,
 ) -> Result<(), String> {
     // Step 1: Verify cryptographic signature
-    verify_signature_crypto(signed, action)?;
+    verify_signature_crypto(signed)?;
 
     // Step 2: Verify public key belongs to the claimed account_id via FastNEAR API
     // This only works for NEAR access keys, not for derived payment keys
@@ -2208,7 +2208,7 @@ async fn generate_invite(
         timestamp_ms: body.timestamp_ms,
         nonce: body.nonce.clone(),
     };
-    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, state.near_rpc_url.as_deref(), &signed, "generate_invite").await {
+    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, state.near_rpc_url.as_deref(), &signed).await {
         warn!("Signature verification failed for generate_invite: {}", e);
         return Ok(Json(GenerateInviteResponse {
             success: false,
@@ -2235,7 +2235,7 @@ async fn send_invite_email(
         timestamp_ms: body.timestamp_ms,
         nonce: body.nonce.clone(),
     };
-    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, state.near_rpc_url.as_deref(), &signed, "send_invite").await {
+    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, state.near_rpc_url.as_deref(), &signed).await {
         warn!("Signature verification failed for send_invite_email: {}", e);
         return Ok(Json(SendInviteResponse {
             success: false,
@@ -2341,7 +2341,7 @@ async fn my_invites(
         timestamp_ms: body.timestamp_ms,
         nonce: body.nonce.clone(),
     };
-    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, state.near_rpc_url.as_deref(), &signed, "my_invites").await {
+    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, state.near_rpc_url.as_deref(), &signed).await {
         warn!("Signature verification failed for my_invites: {}", e);
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -2738,7 +2738,7 @@ mod tests {
     fn test_nep413_payload_serialization() {
         let nonce = [0u8; 32]; // Zero nonce for deterministic test
         let payload = Nep413Payload {
-            message: "near.email:my_invites:test.testnet:1706300000000".to_string(),
+            message: "near.email:test.testnet:1706300000000".to_string(),
             nonce,
             recipient: "near.email".to_string(),
             callback_url: None,
