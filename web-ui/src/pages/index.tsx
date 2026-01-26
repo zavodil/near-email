@@ -13,6 +13,8 @@ import {
   getPaymentKeyOwner,
   isPaymentKeyMode,
   checkUserRegistration,
+  initSendPubkey,
+  getSendPubkey,
   type Email,
   type SentEmail,
   type GetEmailsResult,
@@ -105,6 +107,14 @@ export default function Home({ accounts, loading }: HomeProps) {
   const effectiveAccountId = paymentKeyEnabled && paymentKeyOwner
     ? paymentKeyOwner
     : accountId;
+
+  // Initialize send pubkey from localStorage when account changes
+  // This allows Compose to work immediately after page reload (no transaction needed)
+  useEffect(() => {
+    if (effectiveAccountId) {
+      initSendPubkey(effectiveAccountId);
+    }
+  }, [effectiveAccountId]);
 
   // Check registration status when account changes
   useEffect(() => {
@@ -393,6 +403,20 @@ export default function Home({ accounts, loading }: HomeProps) {
               </>
             )}
           </button>
+
+          {/* Compose button - enabled if send pubkey is cached from previous session */}
+          {getSendPubkey() && (
+            <button
+              onClick={handleOpenCompose}
+              disabled={loadingEmails}
+              className="w-full mt-3 bg-white text-gray-700 py-2.5 px-6 rounded-xl font-medium border border-gray-300 hover:bg-gray-50 transition-colors disabled:opacity-50 shadow-sm flex items-center justify-center gap-2"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              Compose Email
+            </button>
+          )}
 
           <button
             onClick={handleDisconnect}
