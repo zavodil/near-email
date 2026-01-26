@@ -708,3 +708,207 @@ export interface EmailData {
   inbox: Email[];
   sent: SentEmail[];
 }
+
+// ===== INVITE SYSTEM =====
+
+const DB_API_URL = process.env.NEXT_PUBLIC_DB_API_URL || 'http://localhost:8080';
+
+// Invite types
+export interface CheckUserResult {
+  registered: boolean;
+  invites_enabled: boolean;
+}
+
+export interface UseInviteResult {
+  success: boolean;
+  error?: string;
+}
+
+export interface GenerateInviteResult {
+  success: boolean;
+  code?: string;
+  expires_at?: string;
+  error?: string;
+}
+
+export interface SendInviteResult {
+  success: boolean;
+  code?: string;
+  error?: string;
+}
+
+export interface InviteRecord {
+  id: string;
+  code: string;
+  recipient_email?: string;
+  used_by?: string;
+  used_at?: string;
+  created_at: string;
+  expires_at: string;
+  status: 'pending' | 'used' | 'expired';
+}
+
+export interface MyInvitesResult {
+  remaining_invites: number;
+  total_invites: number;
+  used_invites: number;
+  invites: InviteRecord[];
+}
+
+// Signature data for authenticated invite requests
+interface SignedInviteData {
+  signature: string;  // base64 encoded
+  public_key: string; // ed25519:xxx format or base64
+  timestamp_ms: number;
+}
+
+// Sign a message for invite authentication using wallet (NEP-413)
+// Always requires wallet connection - payment key users must also sign with their wallet
+// Returns signature data or null if signing fails
+async function signInviteMessage(action: string, accountId: string): Promise<SignedInviteData | null> {
+  const timestamp_ms = Date.now();
+  const message = `near.email:${action}:${accountId}:${timestamp_ms}`;
+
+  if (!selector) {
+    console.error('Wallet selector not initialized');
+    return null;
+  }
+
+  try {
+    const wallet = await selector.wallet();
+    if (!wallet.signMessage) {
+      console.error('Wallet does not support signMessage');
+      return null;
+    }
+
+    // Generate nonce (32 bytes)
+    const nonceBytes = new Uint8Array(32);
+    crypto.getRandomValues(nonceBytes);
+    const nonce = Buffer.from(nonceBytes);
+
+    const result = await wallet.signMessage({
+      message,
+      recipient: 'near.email',
+      nonce,
+    });
+
+    if (!result) {
+      return null;
+    }
+
+    // Handle signature format - can be string, Uint8Array, or array-like
+    let signatureBase64: string;
+    const sig = result.signature as unknown;
+    if (typeof sig === 'string') {
+      signatureBase64 = sig;
+    } else if (sig instanceof Uint8Array) {
+      signatureBase64 = btoa(String.fromCharCode(...sig));
+    } else if (Array.isArray(sig) || (sig && typeof sig === 'object' && 'length' in sig)) {
+      signatureBase64 = btoa(String.fromCharCode(...new Uint8Array(sig as ArrayLike<number>)));
+    } else {
+      console.error('Unknown signature format:', sig);
+      return null;
+    }
+
+    return {
+      signature: signatureBase64,
+      public_key: result.publicKey,
+      timestamp_ms,
+    };
+  } catch (e) {
+    console.error('Wallet signing failed:', e);
+    return null;
+  }
+}
+
+// Check if user is registered (public endpoint - no auth needed)
+export async function checkUserRegistration(accountId: string): Promise<CheckUserResult> {
+  const response = await fetch(`${DB_API_URL}/invites/check-user?account_id=${encodeURIComponent(accountId)}`);
+  if (!response.ok) {
+    throw new Error(`Failed to check user: ${response.status}`);
+  }
+  return response.json();
+}
+
+// Use an invite code to register (no signature needed - anyone with code can register)
+export async function useInviteCode(code: string, accountId: string): Promise<UseInviteResult> {
+  const response = await fetch(`${DB_API_URL}/invites/use`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, account_id: accountId }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to use invite: ${response.status}`);
+  }
+  return response.json();
+}
+
+// Generate a new invite code (requires signature)
+export async function generateInviteCode(accountId: string): Promise<GenerateInviteResult> {
+  const signed = await signInviteMessage('generate_invite', accountId);
+  if (!signed) {
+    return { success: false, error: 'Failed to sign request. Please connect wallet or use payment key.' };
+  }
+
+  const response = await fetch(`${DB_API_URL}/invites/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      account_id: accountId,
+      signature: signed.signature,
+      public_key: signed.public_key,
+      timestamp_ms: signed.timestamp_ms,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to generate invite: ${response.status}`);
+  }
+  return response.json();
+}
+
+// Send an invite via email (requires signature)
+export async function sendInviteEmail(accountId: string, recipientEmail: string): Promise<SendInviteResult> {
+  const signed = await signInviteMessage('send_invite', accountId);
+  if (!signed) {
+    return { success: false, error: 'Failed to sign request. Please connect wallet or use payment key.' };
+  }
+
+  const response = await fetch(`${DB_API_URL}/invites/send-email`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      account_id: accountId,
+      recipient_email: recipientEmail,
+      signature: signed.signature,
+      public_key: signed.public_key,
+      timestamp_ms: signed.timestamp_ms,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to send invite: ${response.status}`);
+  }
+  return response.json();
+}
+
+// Get user's invites and status (requires signature, now POST)
+export async function getMyInvites(accountId: string): Promise<MyInvitesResult> {
+  const signed = await signInviteMessage('my_invites', accountId);
+  if (!signed) {
+    throw new Error('Failed to sign request. Please connect wallet or use payment key.');
+  }
+
+  const response = await fetch(`${DB_API_URL}/invites/my`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      account_id: accountId,
+      signature: signed.signature,
+      public_key: signed.public_key,
+      timestamp_ms: signed.timestamp_ms,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to get invites: ${response.status}`);
+  }
+  return response.json();
+}

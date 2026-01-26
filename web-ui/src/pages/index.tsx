@@ -12,6 +12,7 @@ import {
   getPaymentKeyConfig,
   getPaymentKeyOwner,
   isPaymentKeyMode,
+  checkUserRegistration,
   type Email,
   type SentEmail,
   type GetEmailsResult,
@@ -24,6 +25,8 @@ import SentEmailView from '@/components/SentEmailView';
 import ComposeModal from '@/components/ComposeModal';
 import LimitsModal from '@/components/LimitsModal';
 import Toast, { type ToastType } from '@/components/Toast';
+import InviteCodeModal from '@/components/InviteCodeModal';
+import InvitesModal from '@/components/InvitesModal';
 
 interface HomeProps {
   accounts: AccountState[];
@@ -61,6 +64,13 @@ export default function Home({ accounts, loading }: HomeProps) {
   const [paymentKeyError, setPaymentKeyError] = useState<string | null>(null);
   // Limits modal state
   const [showLimitsModal, setShowLimitsModal] = useState(false);
+  // Invite system state
+  const [isRegistered, setIsRegistered] = useState<boolean | null>(null);
+  const [invitesEnabled, setInvitesEnabled] = useState(true);
+  const [showInviteCodeModal, setShowInviteCodeModal] = useState(false);
+  const [showInvitesModal, setShowInvitesModal] = useState(false);
+  const [inviteCodeFromUrl, setInviteCodeFromUrl] = useState<string | null>(null);
+  const [checkingRegistration, setCheckingRegistration] = useState(false);
 
   function showToast(message: string, type: ToastType = 'success') {
     setToast({ message, type });
@@ -77,6 +87,15 @@ export default function Home({ accounts, loading }: HomeProps) {
     setPaymentKeyEnabledState(config.enabled);
     setPaymentKeyOwnerState(config.owner);
     setPaymentKeyHasKey(config.hasKey);
+
+    // Check for invite code in URL
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const invite = params.get('invite');
+      if (invite) {
+        setInviteCodeFromUrl(invite.toUpperCase());
+      }
+    }
   }, []);
 
   const isConnected = accounts.length > 0;
@@ -86,6 +105,36 @@ export default function Home({ accounts, loading }: HomeProps) {
   const effectiveAccountId = paymentKeyEnabled && paymentKeyOwner
     ? paymentKeyOwner
     : accountId;
+
+  // Check registration status when account changes
+  useEffect(() => {
+    async function checkRegistration() {
+      if (!effectiveAccountId) {
+        setIsRegistered(null);
+        return;
+      }
+
+      setCheckingRegistration(true);
+      try {
+        const result = await checkUserRegistration(effectiveAccountId);
+        setInvitesEnabled(result.invites_enabled);
+        setIsRegistered(result.registered);
+
+        // If not registered and invites are enabled, show invite modal
+        if (!result.registered && result.invites_enabled) {
+          setShowInviteCodeModal(true);
+        }
+      } catch (err) {
+        // If check fails, assume registered (allow access)
+        console.error('Failed to check registration:', err);
+        setIsRegistered(true);
+      } finally {
+        setCheckingRegistration(false);
+      }
+    }
+
+    checkRegistration();
+  }, [effectiveAccountId]);
 
   // Handle both .near and .testnet suffixes
   const emailAddress = effectiveAccountId
@@ -273,6 +322,40 @@ export default function Home({ accounts, loading }: HomeProps) {
 
   // Check mail screen - can use app but hasn't checked yet
   if (canUseApp && !hasCheckedMail) {
+    // Show checking registration spinner
+    if (checkingRegistration) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100">
+          <div className="text-center">
+            <div className="inline-block w-8 h-8 border-3 border-gray-200 border-t-purple-500 rounded-full animate-spin mb-4"></div>
+            <p className="text-gray-500">Checking access...</p>
+          </div>
+        </div>
+      );
+    }
+
+    // Show invite code modal if not registered (and invites are enabled)
+    if (invitesEnabled && isRegistered === false) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-gradient-to-br from-gray-50 to-gray-100">
+          <h1 className="text-3xl font-bold text-gray-900 mb-6">near.email</h1>
+          <InviteCodeModal
+            accountId={effectiveAccountId!}
+            initialCode={inviteCodeFromUrl || ''}
+            onSuccess={() => {
+              setIsRegistered(true);
+              setShowInviteCodeModal(false);
+              // Clear invite code from URL
+              if (typeof window !== 'undefined' && inviteCodeFromUrl) {
+                window.history.replaceState({}, '', window.location.pathname);
+              }
+            }}
+            onCancel={handleDisconnect}
+          />
+        </div>
+      );
+    }
+
     return (
       <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-gradient-to-br from-gray-50 to-gray-100">
         <h1 className="text-3xl font-bold text-gray-900 mb-6">near.email</h1>
@@ -280,8 +363,8 @@ export default function Home({ accounts, loading }: HomeProps) {
         <div className="bg-white rounded-2xl shadow-xl border border-gray-100 p-6 max-w-sm w-full text-center">
           <div className="w-14 h-14 bg-gradient-to-br from-blue-400 to-blue-600 rounded-full flex items-center justify-center text-white text-xl font-bold mx-auto mb-4">
             {effectiveAccountId?.charAt(0).toUpperCase()}
-          </div>          
-          <p className="text-sm text-gray-500 mb-1">Connected as</p>          
+          </div>
+          <p className="text-sm text-gray-500 mb-1">Connected as</p>
           <p className="font-semibold text-gray-900 mb-1">{effectiveAccountId}</p>
           <p className="text-sm text-gray-400 mb-6">{emailAddress}</p>
 
@@ -512,6 +595,16 @@ export default function Home({ accounts, loading }: HomeProps) {
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </button>
+          {/* Invites button */}
+          <button
+            onClick={() => setShowInvitesModal(true)}
+            className="p-2 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition-colors"
+            title="Invites"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
             </svg>
           </button>
           {/* Docs link */}
@@ -759,6 +852,13 @@ export default function Home({ accounts, loading }: HomeProps) {
         isOpen={showLimitsModal}
         onClose={() => setShowLimitsModal(false)}
         isHttpsMode={isPaymentKeyMode()}
+      />
+
+      {/* Invites modal */}
+      <InvitesModal
+        accountId={effectiveAccountId || ''}
+        isOpen={showInvitesModal}
+        onClose={() => setShowInvitesModal(false)}
       />
 
       {/* Toast notification */}

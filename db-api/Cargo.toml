@@ -29,6 +29,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 base64 = "0.21"
+rand = "0.8"
 
 # SMTP sending
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
@@ -36,6 +37,13 @@ hickory-resolver = "0.24"
 
 # DKIM signing
 mail-auth = "0.4"
+
+# Signature verification (for invite system auth)
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+bs58 = "0.5"
+
+# HTTP client for FastNEAR API (public key ownership verification)
+reqwest = { version = "0.11", features = ["json"] }
 
 [profile.release]
 opt-level = 3

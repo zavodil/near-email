@@ -4,13 +4,14 @@
 //! since WASI cannot make direct database connections.
 
 use axum::{
-    extract::{DefaultBodyLimit, Path, Query, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::Response,
     routing::{delete, get, post},
     Json, Router,
 };
+use rand::Rng;
 use chrono::{DateTime, Utc};
 use hickory_resolver::{config::*, TokioAsyncResolver};
 use std::net::IpAddr;
@@ -35,11 +36,13 @@ use mail_auth::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, env, net::SocketAddr, sync::Arc};
+use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use uuid::Uuid;
+use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 
 /// DKIM configuration for signing outgoing emails
 struct DkimConfig {
@@ -63,6 +66,9 @@ struct SmtpRelayConfig {
     password: String,
 }
 
+/// Rate limiter entry: (attempt_count, window_start_time)
+type RateLimitEntry = (u32, DateTime<Utc>);
+
 struct AppState {
     db: PgPool,
     email_domain: String,
@@ -77,6 +83,12 @@ struct AppState {
     smtp_relay: Option<SmtpRelayConfig>,
     /// API secret for authenticating requests from WASI and SMTP server
     api_secret: Option<String>,
+    /// FastNEAR API URL for public key ownership verification
+    /// Mainnet: https://api.fastnear.com, Testnet: https://test.api.fastnear.com
+    fastnear_api_url: String,
+    /// Rate limiter for invite code attempts (IP -> (count, window_start))
+    /// Limits: 10 attempts per minute per IP
+    invite_rate_limiter: Mutex<HashMap<String, RateLimitEntry>>,
 }
 
 #[tokio::main]
@@ -184,9 +196,17 @@ async fn main() -> anyhow::Result<()> {
         warn!("API_SECRET not set - API is UNPROTECTED!");
     }
 
+    // FastNEAR API URL for public key ownership verification
+    // Mainnet: https://api.fastnear.com, Testnet: https://test.api.fastnear.com
+    let fastnear_api_url = env::var("FASTNEAR_API_URL")
+        .unwrap_or_else(|_| "https://api.fastnear.com".to_string());
+    info!("FastNEAR API URL: {}", fastnear_api_url);
+
     info!("Email domain: {}, account suffix: {}", email_domain, account_suffix);
 
-    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay, api_secret };
+    let invite_rate_limiter = Mutex::new(HashMap::new());
+
+    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay, api_secret, fastnear_api_url, invite_rate_limiter };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -207,11 +227,26 @@ async fn main() -> anyhow::Result<()> {
         .route("/store-sent", post(store_sent_email))
         .route("/attachments", post(store_attachment))
         .route("/attachments/:id", get(get_attachment))
+        // Admin routes (protected)
+        .route("/admin/invites/grant", post(admin_grant_invites))
+        .route("/admin/invites/seed-user", post(admin_seed_user))
+        // Blacklist admin routes
+        .route("/admin/blacklist/add", post(admin_blacklist_add))
+        .route("/admin/blacklist/remove", post(admin_blacklist_remove))
+        .route("/admin/blacklist/check", get(admin_blacklist_check))
+        // Stats route
+        .route("/admin/stats", get(admin_get_stats))
         .layer(middleware::from_fn_with_state(shared_state.clone(), require_api_secret));
 
     // Public routes (no auth needed)
     let public_routes = Router::new()
-        .route("/health", get(health));
+        .route("/health", get(health))
+        // Invite routes (public - called by frontend, have their own protection logic)
+        .route("/invites/check-user", get(check_user))
+        .route("/invites/use", post(use_invite))
+        .route("/invites/generate", post(generate_invite))
+        .route("/invites/send-email", post(send_invite_email))
+        .route("/invites/my", post(my_invites));
 
     let app = Router::new()
         .merge(protected_routes)
@@ -224,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting DB API on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
 }
@@ -599,6 +634,23 @@ async fn send_email(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SendEmailBody>,
 ) -> Result<Json<SendResponse>, StatusCode> {
+    // Check access (registration + not blacklisted)
+    match check_account_access(&state.db, &body.from_account).await? {
+        AccessCheck::Allowed => {}
+        AccessCheck::NotRegistered => {
+            return Ok(Json(SendResponse {
+                success: false,
+                error: Some("Account not registered. Please use an invite code to join.".to_string()),
+            }));
+        }
+        AccessCheck::Blacklisted(reason) => {
+            return Ok(Json(SendResponse {
+                success: false,
+                error: Some(format!("Account suspended: {}", reason)),
+            }));
+        }
+    }
+
     // Log only metadata, not content (privacy)
     info!(
         "📤 Send email request: from={}, to={}, subject_len={}, body_len={}",
@@ -756,6 +808,8 @@ async fn send_email(
     match send_result {
         Ok(_) => {
             info!("Email sent successfully to {} via {}", body.to, via);
+            // Increment sent stats
+            increment_sent_stats(&state.db, &body.from_account).await;
             Ok(Json(SendResponse { success: true, error: None }))
         }
         Err(e) => {
@@ -975,6 +1029,9 @@ async fn store_internal_email(
         id, body.recipient, body.sender_email, body.encrypted_data.len()
     );
 
+    // Increment received stats for recipient
+    increment_received_stats(&state.db, &body.recipient).await;
+
     Ok(Json(StoreInternalResponse {
         success: true,
         id: id.to_string(),
@@ -1025,6 +1082,29 @@ async fn request_email(
     State(state): State<Arc<AppState>>,
     Query(query): Query<RequestEmailQuery>,
 ) -> Result<Json<RequestEmailResponse>, StatusCode> {
+    // Check access (registration + not blacklisted)
+    match check_account_access(&state.db, &query.account_id).await? {
+        AccessCheck::Allowed => {}
+        AccessCheck::NotRegistered => {
+            // Return empty response for unregistered users (they can still see if they have pending emails)
+            // but they cannot access the actual content
+            return Ok(Json(RequestEmailResponse {
+                inbox: vec![],
+                sent: vec![],
+                inbox_count: 0,
+                sent_count: 0,
+            }));
+        }
+        AccessCheck::Blacklisted(_) => {
+            return Ok(Json(RequestEmailResponse {
+                inbox: vec![],
+                sent: vec![],
+                inbox_count: 0,
+                sent_count: 0,
+            }));
+        }
+    }
+
     // Run all queries in parallel: inbox, sent, inbox_count, sent_count
     let (inbox_result, sent_result, inbox_count_result, sent_count_result) = tokio::join!(
         sqlx::query_as::<_, EmailRow>(
@@ -1254,4 +1334,1198 @@ async fn get_attachment(
         size: row.size,
         encrypted_data: row.encrypted_data,
     }))
+}
+
+// ==================== Invite System ====================
+
+/// Generate a random invite code (8 chars, alphanumeric)
+fn generate_invite_code() -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // No I/O/0/1 to avoid confusion
+    let mut rng = rand::thread_rng();
+    (0..8)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
+}
+
+// Invite types
+#[derive(Debug, Deserialize)]
+struct CheckUserQuery {
+    account_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CheckUserResponse {
+    registered: bool,
+    invites_enabled: bool,
+}
+
+// ==================== Signature Verification ====================
+
+/// Signed request for invite operations
+/// Message format: "near.email:{action}:{account_id}:{timestamp_ms}"
+#[derive(Debug, Deserialize)]
+struct SignedRequest {
+    account_id: String,
+    /// Base64 encoded ed25519 signature
+    signature: String,
+    /// Public key in NEAR format (ed25519:xxx) or base64
+    public_key: String,
+    /// Timestamp in milliseconds (for replay protection)
+    timestamp_ms: u64,
+}
+
+/// Response from FastNEAR API for public key lookup
+#[derive(Debug, Deserialize)]
+struct FastNearPublicKeyResponse {
+    account_ids: Vec<String>,
+}
+
+/// Verify that a public key belongs to the claimed account_id using FastNEAR API
+/// Returns Ok(()) if key ownership verified, Err(reason) otherwise
+async fn verify_access_key_owner(
+    fastnear_api_url: &str,
+    public_key: &str,
+    account_id: &str,
+) -> Result<(), String> {
+    let url = format!("{}/v0/public_key/{}", fastnear_api_url, public_key);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("FastNEAR API request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        // 404 means public key not found on chain
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err("Public key not found on chain".to_string());
+        }
+        return Err(format!("FastNEAR API error: {}", response.status()));
+    }
+
+    let data: FastNearPublicKeyResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse FastNEAR response: {}", e))?;
+
+    if data.account_ids.contains(&account_id.to_string()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Public key does not belong to account {}. Key belongs to: {:?}",
+            account_id,
+            data.account_ids
+        ))
+    }
+}
+
+/// Verify ed25519 signature for invite requests (cryptographic verification only)
+/// Returns Ok(()) if signature is valid, Err(reason) otherwise
+fn verify_signature_crypto(signed: &SignedRequest, action: &str) -> Result<(), String> {
+    // Check timestamp (allow 1 hour window)
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let one_hour_ms = 60 * 60 * 1000;
+    if signed.timestamp_ms > now_ms + one_hour_ms {
+        return Err("Timestamp is in the future".to_string());
+    }
+    if now_ms > signed.timestamp_ms + one_hour_ms {
+        return Err("Signature expired".to_string());
+    }
+
+    // Parse public key (handle NEAR format ed25519:xxx or raw base64)
+    let pubkey_bytes = if signed.public_key.starts_with("ed25519:") {
+        // NEAR format: ed25519:BASE58_KEY
+        let key_str = signed.public_key.strip_prefix("ed25519:").unwrap();
+        bs58::decode(key_str)
+            .into_vec()
+            .map_err(|e| format!("Invalid public key base58: {}", e))?
+    } else {
+        // Raw base64
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &signed.public_key)
+            .map_err(|e| format!("Invalid public key base64: {}", e))?
+    };
+
+    if pubkey_bytes.len() != 32 {
+        return Err(format!("Invalid public key length: {} (expected 32)", pubkey_bytes.len()));
+    }
+
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes.try_into().unwrap())
+        .map_err(|e| format!("Invalid public key: {}", e))?;
+
+    // Build message
+    let message = format!(
+        "near.email:{}:{}:{}",
+        action, signed.account_id, signed.timestamp_ms
+    );
+
+    // Decode signature
+    let sig_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &signed.signature)
+        .map_err(|e| format!("Invalid signature base64: {}", e))?;
+
+    if sig_bytes.len() != 64 {
+        return Err(format!("Invalid signature length: {} (expected 64)", sig_bytes.len()));
+    }
+
+    let signature = Signature::from_bytes(&sig_bytes.try_into().unwrap());
+
+    // Verify
+    verifying_key
+        .verify(message.as_bytes(), &signature)
+        .map_err(|_| "Signature verification failed".to_string())?;
+
+    Ok(())
+}
+
+/// Full signature verification: cryptographic check + public key ownership verification
+/// Returns Ok(()) if signature is valid AND key belongs to account, Err(reason) otherwise
+///
+/// Flow:
+/// 1. Verify ed25519 signature cryptographically (+ timestamp check for replay protection)
+/// 2. Verify public key belongs to claimed account_id via FastNEAR API
+async fn verify_signature_with_ownership(
+    fastnear_api_url: &str,
+    signed: &SignedRequest,
+    action: &str,
+) -> Result<(), String> {
+    // Step 1: Verify cryptographic signature
+    verify_signature_crypto(signed, action)?;
+
+    // Step 2: Verify public key belongs to the claimed account_id via FastNEAR API
+    // This only works for NEAR access keys, not for derived payment keys
+    verify_access_key_owner(fastnear_api_url, &signed.public_key, &signed.account_id).await?;
+
+    Ok(())
+}
+
+// ==================== Invite Types ====================
+
+#[derive(Debug, Deserialize)]
+struct UseInviteBody {
+    code: String,
+    account_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UseInviteResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GenerateInviteBody {
+    account_id: String,
+    /// Base64 encoded ed25519 signature
+    signature: String,
+    /// Public key in NEAR format (ed25519:xxx) or base64
+    public_key: String,
+    /// Timestamp in milliseconds
+    timestamp_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct GenerateInviteResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendInviteBody {
+    account_id: String,
+    recipient_email: String,
+    /// Base64 encoded ed25519 signature
+    signature: String,
+    /// Public key in NEAR format (ed25519:xxx) or base64
+    public_key: String,
+    /// Timestamp in milliseconds
+    timestamp_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct SendInviteResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MyInvitesBody {
+    account_id: String,
+    /// Base64 encoded ed25519 signature
+    signature: String,
+    /// Public key in NEAR format (ed25519:xxx) or base64
+    public_key: String,
+    /// Timestamp in milliseconds
+    timestamp_ms: u64,
+}
+
+#[derive(Debug, FromRow)]
+struct InviteRow {
+    id: Uuid,
+    code: String,
+    recipient_email: Option<String>,
+    used_by_account_id: Option<String>,
+    used_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct InviteRecord {
+    id: String,
+    code: String,
+    recipient_email: Option<String>,
+    used_by: Option<String>,
+    used_at: Option<String>,
+    created_at: String,
+    expires_at: String,
+    status: String, // "pending", "used", "expired"
+}
+
+#[derive(Debug, Serialize)]
+struct MyInvitesResponse {
+    remaining_invites: i32,
+    total_invites: i32,
+    used_invites: i32,
+    invites: Vec<InviteRecord>,
+}
+
+/// Check if user is registered
+async fn check_user(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CheckUserQuery>,
+) -> Result<Json<CheckUserResponse>, StatusCode> {
+    // Check if invites are enabled
+    let invites_enabled: bool = sqlx::query_scalar(
+        "SELECT value = 'true' FROM invite_settings WHERE key = 'invites_enabled'"
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to check invite settings: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .unwrap_or(true);
+
+    // Check if user is registered
+    let registered: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM registered_users WHERE account_id = $1)"
+    )
+    .bind(&query.account_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to check user registration: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(CheckUserResponse { registered, invites_enabled }))
+}
+
+/// Access check result
+enum AccessCheck {
+    Allowed,
+    NotRegistered,
+    Blacklisted(String),
+}
+
+/// Check if account can access email service (registered + not blacklisted)
+/// Returns AccessCheck enum with reason if denied
+async fn check_account_access(db: &PgPool, account_id: &str) -> Result<AccessCheck, StatusCode> {
+    // Check if invites are enabled (if disabled, everyone has access)
+    let invites_enabled: bool = sqlx::query_scalar(
+        "SELECT value = 'true' FROM invite_settings WHERE key = 'invites_enabled'"
+    )
+    .fetch_optional(db)
+    .await
+    .map_err(|e| {
+        error!("Failed to check invite settings: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .unwrap_or(true);
+
+    // Check if account is blacklisted (always check, even if invites disabled)
+    // reason column is nullable, so we get Option<Option<String>> from fetch_optional
+    let blacklist_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM blacklist WHERE account_id = $1)"
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await
+    .map_err(|e| {
+        error!("Failed to check blacklist: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if blacklist_exists {
+        // Get the reason if exists
+        let reason: Option<String> = sqlx::query_scalar(
+            "SELECT reason FROM blacklist WHERE account_id = $1"
+        )
+        .bind(account_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| {
+            error!("Failed to get blacklist reason: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .flatten(); // Option<Option<String>> -> Option<String>
+
+        return Ok(AccessCheck::Blacklisted(reason.unwrap_or_else(|| "Account suspended".to_string())));
+    }
+
+    // If invites disabled, everyone (except blacklisted) has access
+    if !invites_enabled {
+        return Ok(AccessCheck::Allowed);
+    }
+
+    // Check registration
+    let registered: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM registered_users WHERE account_id = $1)"
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await
+    .map_err(|e| {
+        error!("Failed to check registration: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if !registered {
+        return Ok(AccessCheck::NotRegistered);
+    }
+
+    Ok(AccessCheck::Allowed)
+}
+
+/// Increment email stats for received email
+async fn increment_received_stats(db: &PgPool, account_id: &str) {
+    if let Err(e) = sqlx::query(
+        r#"
+        INSERT INTO email_stats (account_id, emails_received, last_received_at)
+        VALUES ($1, 1, NOW())
+        ON CONFLICT (account_id) DO UPDATE SET
+            emails_received = email_stats.emails_received + 1,
+            last_received_at = NOW()
+        "#
+    )
+    .bind(account_id)
+    .execute(db)
+    .await {
+        warn!("Failed to update received stats for {}: {}", account_id, e);
+    }
+}
+
+/// Increment email stats for sent email
+async fn increment_sent_stats(db: &PgPool, account_id: &str) {
+    if let Err(e) = sqlx::query(
+        r#"
+        INSERT INTO email_stats (account_id, emails_sent, last_sent_at)
+        VALUES ($1, 1, NOW())
+        ON CONFLICT (account_id) DO UPDATE SET
+            emails_sent = email_stats.emails_sent + 1,
+            last_sent_at = NOW()
+        "#
+    )
+    .bind(account_id)
+    .execute(db)
+    .await {
+        warn!("Failed to update sent stats for {}: {}", account_id, e);
+    }
+}
+
+/// Use an invite code to register
+async fn use_invite(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<UseInviteBody>,
+) -> Result<Json<UseInviteResponse>, StatusCode> {
+    // Rate limiting: 10 attempts per minute per IP
+    let ip = addr.ip().to_string();
+    {
+        let mut limiter = state.invite_rate_limiter.lock().await;
+        let now = Utc::now();
+        let window_duration = chrono::Duration::minutes(1);
+
+        if let Some((count, window_start)) = limiter.get_mut(&ip) {
+            if now.signed_duration_since(*window_start) > window_duration {
+                // Window expired, reset
+                *count = 1;
+                *window_start = now;
+            } else if *count >= 10 {
+                // Rate limited
+                warn!("Rate limit exceeded for IP {} on /invites/use", ip);
+                return Ok(Json(UseInviteResponse {
+                    success: false,
+                    error: Some("Too many attempts. Please try again in a minute.".to_string()),
+                }));
+            } else {
+                *count += 1;
+            }
+        } else {
+            limiter.insert(ip.clone(), (1, now));
+        }
+
+        // Cleanup old entries (keep map from growing indefinitely)
+        if limiter.len() > 10000 {
+            let cutoff = now - window_duration;
+            limiter.retain(|_, (_, start)| *start > cutoff);
+        }
+    }
+
+    let code = body.code.trim().to_uppercase();
+
+    // Check if user already registered
+    let already_registered: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM registered_users WHERE account_id = $1)"
+    )
+    .bind(&body.account_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if already_registered {
+        return Ok(Json(UseInviteResponse {
+            success: false,
+            error: Some("You are already registered".to_string()),
+        }));
+    }
+
+    // Find valid invite code (not used, not expired)
+    let invite: Option<(Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT id, owner_account_id
+        FROM invites
+        WHERE code = $1
+          AND used_by_account_id IS NULL
+          AND expires_at > NOW()
+        "#
+    )
+    .bind(&code)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to find invite: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let Some((invite_id, inviter)) = invite else {
+        return Ok(Json(UseInviteResponse {
+            success: false,
+            error: Some("Invalid or expired invite code".to_string()),
+        }));
+    };
+
+    // Start transaction
+    let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Mark invite as used
+    sqlx::query(
+        "UPDATE invites SET used_by_account_id = $1, used_at = NOW() WHERE id = $2"
+    )
+    .bind(&body.account_id)
+    .bind(invite_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Register user
+    sqlx::query(
+        r#"
+        INSERT INTO registered_users (account_id, invited_by, invite_code)
+        VALUES ($1, $2, $3)
+        "#
+    )
+    .bind(&body.account_id)
+    .bind(&inviter)
+    .bind(&code)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Create invite allowance for new user
+    let default_invites: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(value::int, 3) FROM invite_settings WHERE key = 'default_base_invites'"
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .unwrap_or(3);
+
+    sqlx::query(
+        "INSERT INTO invite_allowance (account_id, base_invites) VALUES ($1, $2)"
+    )
+    .bind(&body.account_id)
+    .bind(default_invites)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Referral bonus: give inviter +1 invite when their invitee registers
+    sqlx::query(
+        r#"
+        UPDATE invite_allowance
+        SET bonus_invites = bonus_invites + 1
+        WHERE account_id = $1
+        "#
+    )
+    .bind(&inviter)
+    .execute(&mut *tx)
+    .await
+    .ok(); // Don't fail if inviter doesn't have allowance row
+
+    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    info!("User {} registered using invite {} from {}", body.account_id, code, inviter);
+
+    // Send notification email to inviter (async, don't block registration)
+    let inviter_clone = inviter.clone();
+    let new_user = body.account_id.clone();
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = send_invite_accepted_notification(&state_clone, &inviter_clone, &new_user).await {
+            warn!("Failed to send invite notification to {}: {}", inviter_clone, e);
+        }
+    });
+
+    Ok(Json(UseInviteResponse { success: true, error: None }))
+}
+
+/// Send notification email to inviter when their invite is accepted
+async fn send_invite_accepted_notification(
+    state: &Arc<AppState>,
+    inviter: &str,
+    new_user: &str,
+) -> Result<(), String> {
+    // Build inviter's email address
+    let inviter_local = inviter
+        .strip_suffix(&state.account_suffix)
+        .unwrap_or(inviter);
+    let inviter_email = format!("{}@{}", inviter_local, state.email_domain);
+
+    let new_user_local = new_user
+        .strip_suffix(&state.account_suffix)
+        .unwrap_or(new_user);
+
+    let subject = format!("{} joined near.email using your invite!", new_user_local);
+
+    let email_body = format!(
+        r#"Great news!
+
+{} has joined near.email using your invite code.
+
+As a thank you, you've received +1 bonus invite!
+
+Your new friend's email: {}@{}
+
+Keep spreading the word and earn more invites when your friends join.
+
+--
+near.email team"#,
+        new_user, new_user_local, state.email_domain
+    );
+
+    // Send via existing send_email logic
+    let send_body = SendEmailBody {
+        from_account: format!("dev{}", state.account_suffix), // dev.near or dev.testnet
+        to: inviter_email,
+        subject,
+        body: email_body,
+        attachments: vec![],
+    };
+
+    let result = send_email(State(state.clone()), Json(send_body)).await
+        .map_err(|e| format!("HTTP error: {:?}", e))?;
+
+    if !result.0.success {
+        return Err(result.0.error.unwrap_or_else(|| "Unknown error".to_string()));
+    }
+
+    info!("Sent invite acceptance notification to {}", inviter);
+    Ok(())
+}
+
+/// Internal: Generate invite without signature verification (for internal use)
+async fn generate_invite_internal(
+    db: &PgPool,
+    account_id: &str,
+) -> Result<GenerateInviteResponse, StatusCode> {
+    // Check remaining invites
+    let (base, bonus, used): (i32, i32, i64) = {
+        let allowance: Option<(i32, i32)> = sqlx::query_as(
+            "SELECT base_invites, bonus_invites FROM invite_allowance WHERE account_id = $1"
+        )
+        .bind(account_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let (base, bonus) = allowance.unwrap_or((0, 0));
+
+        let used: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invites WHERE owner_account_id = $1"
+        )
+        .bind(account_id)
+        .fetch_one(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        (base, bonus, used)
+    };
+
+    let remaining = (base + bonus) as i64 - used;
+    if remaining <= 0 {
+        return Ok(GenerateInviteResponse {
+            success: false,
+            code: None,
+            expires_at: None,
+            error: Some("No invites remaining".to_string()),
+        });
+    }
+
+    // Get expiry days
+    let expiry_days: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(value::int, 7) FROM invite_settings WHERE key = 'invite_expiry_days'"
+    )
+    .fetch_optional(db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .unwrap_or(7);
+
+    // Generate unique code
+    let code = generate_invite_code();
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(expiry_days as i64);
+
+    sqlx::query(
+        r#"
+        INSERT INTO invites (code, owner_account_id, expires_at)
+        VALUES ($1, $2, $3)
+        "#
+    )
+    .bind(&code)
+    .bind(account_id)
+    .bind(expires_at)
+    .execute(db)
+    .await
+    .map_err(|e| {
+        error!("Failed to create invite: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    info!("Invite {} generated by {}", code, account_id);
+
+    Ok(GenerateInviteResponse {
+        success: true,
+        code: Some(code),
+        expires_at: Some(expires_at.to_rfc3339()),
+        error: None,
+    })
+}
+
+/// Generate a new invite code (requires signature)
+async fn generate_invite(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<GenerateInviteBody>,
+) -> Result<Json<GenerateInviteResponse>, StatusCode> {
+    // Verify signature with public key ownership check
+    let signed = SignedRequest {
+        account_id: body.account_id.clone(),
+        signature: body.signature.clone(),
+        public_key: body.public_key.clone(),
+        timestamp_ms: body.timestamp_ms,
+    };
+    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, &signed, "generate_invite").await {
+        warn!("Signature verification failed for generate_invite: {}", e);
+        return Ok(Json(GenerateInviteResponse {
+            success: false,
+            code: None,
+            expires_at: None,
+            error: Some(format!("Authentication failed: {}", e)),
+        }));
+    }
+
+    let result = generate_invite_internal(&state.db, &body.account_id).await?;
+    Ok(Json(result))
+}
+
+/// Send an invite via email
+async fn send_invite_email(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SendInviteBody>,
+) -> Result<Json<SendInviteResponse>, StatusCode> {
+    // Verify signature with public key ownership check
+    let signed = SignedRequest {
+        account_id: body.account_id.clone(),
+        signature: body.signature.clone(),
+        public_key: body.public_key.clone(),
+        timestamp_ms: body.timestamp_ms,
+    };
+    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, &signed, "send_invite").await {
+        warn!("Signature verification failed for send_invite_email: {}", e);
+        return Ok(Json(SendInviteResponse {
+            success: false,
+            code: None,
+            error: Some(format!("Authentication failed: {}", e)),
+        }));
+    }
+
+    // Generate an invite using internal function (signature already verified above)
+    let gen_response = generate_invite_internal(&state.db, &body.account_id).await?;
+    if !gen_response.success {
+        return Ok(Json(SendInviteResponse {
+            success: false,
+            code: None,
+            error: gen_response.error,
+        }));
+    }
+
+    let code = gen_response.code.unwrap();
+    let expires_at = gen_response.expires_at.unwrap();
+
+    // Update invite with recipient email
+    sqlx::query(
+        "UPDATE invites SET recipient_email = $1 WHERE code = $2"
+    )
+    .bind(&body.recipient_email)
+    .bind(&code)
+    .execute(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Build email - strip suffix from account
+    let from_local = body.account_id
+        .strip_suffix(&state.account_suffix)
+        .unwrap_or(&body.account_id);
+
+    let subject = format!("{} invites you to near.email", from_local);
+    let invite_link = format!("https://near.email?invite={}", code);
+
+    let email_body = format!(
+        r#"Hi!
+
+{} has invited you to join near.email - blockchain-native secure email.
+
+Your invite code: {}
+
+Or click this link to get started:
+{}
+
+This invite expires on {}.
+
+What is near.email?
+- Your NEAR wallet = your email (alice.near -> alice@near.email)
+- End-to-end encrypted - only you can read your mail
+- Send to anyone - Gmail, Outlook, any address works
+- Powered by TEE (Trusted Execution Environment) for maximum security
+
+Get started at https://near.email
+
+--
+Sent via near.email"#,
+        from_local, code, invite_link, expires_at
+    );
+
+    // Send the email using existing send_email logic
+    let send_body = SendEmailBody {
+        from_account: body.account_id.clone(),
+        to: body.recipient_email.clone(),
+        subject,
+        body: email_body,
+        attachments: vec![],
+    };
+
+    let send_result = send_email(State(state), Json(send_body)).await?;
+
+    if !send_result.0.success {
+        return Ok(Json(SendInviteResponse {
+            success: false,
+            code: Some(code),
+            error: send_result.0.error,
+        }));
+    }
+
+    info!("Invite {} sent to {} by {}", code, body.recipient_email, body.account_id);
+
+    Ok(Json(SendInviteResponse {
+        success: true,
+        code: Some(code),
+        error: None,
+    }))
+}
+
+/// Get user's invites and status (requires signature)
+async fn my_invites(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<MyInvitesBody>,
+) -> Result<Json<MyInvitesResponse>, StatusCode> {
+    // Verify signature with public key ownership check
+    let signed = SignedRequest {
+        account_id: body.account_id.clone(),
+        signature: body.signature.clone(),
+        public_key: body.public_key.clone(),
+        timestamp_ms: body.timestamp_ms,
+    };
+    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, &signed, "my_invites").await {
+        warn!("Signature verification failed for my_invites: {}", e);
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // Get allowance
+    let allowance: Option<(i32, i32)> = sqlx::query_as(
+        "SELECT base_invites, bonus_invites FROM invite_allowance WHERE account_id = $1"
+    )
+    .bind(&body.account_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let (base, bonus) = allowance.unwrap_or((0, 0));
+    let total_invites = base + bonus;
+
+    // Get all invites created by user
+    let rows: Vec<InviteRow> = sqlx::query_as(
+        r#"
+        SELECT id, code, recipient_email, used_by_account_id, used_at, created_at, expires_at
+        FROM invites
+        WHERE owner_account_id = $1
+        ORDER BY created_at DESC
+        "#
+    )
+    .bind(&body.account_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let used_invites = rows.len() as i32;
+    let remaining_invites = total_invites - used_invites;
+
+    let now = chrono::Utc::now();
+    let invites: Vec<InviteRecord> = rows
+        .into_iter()
+        .map(|row| {
+            let status = if row.used_by_account_id.is_some() {
+                "used".to_string()
+            } else if row.expires_at < now {
+                "expired".to_string()
+            } else {
+                "pending".to_string()
+            };
+
+            InviteRecord {
+                id: row.id.to_string(),
+                code: row.code,
+                recipient_email: row.recipient_email,
+                used_by: row.used_by_account_id,
+                used_at: row.used_at.map(|t| t.to_rfc3339()),
+                created_at: row.created_at.to_rfc3339(),
+                expires_at: row.expires_at.to_rfc3339(),
+                status,
+            }
+        })
+        .collect();
+
+    Ok(Json(MyInvitesResponse {
+        remaining_invites,
+        total_invites,
+        used_invites,
+        invites,
+    }))
+}
+
+/// Admin: Grant bonus invites to a user
+#[derive(Debug, Deserialize)]
+struct GrantInvitesBody {
+    account_id: String,
+    amount: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct GrantInvitesResponse {
+    success: bool,
+    new_bonus: i32,
+}
+
+async fn admin_grant_invites(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<GrantInvitesBody>,
+) -> Result<Json<GrantInvitesResponse>, StatusCode> {
+    // Upsert invite_allowance
+    let new_bonus: i32 = sqlx::query_scalar(
+        r#"
+        INSERT INTO invite_allowance (account_id, bonus_invites)
+        VALUES ($1, $2)
+        ON CONFLICT (account_id) DO UPDATE SET bonus_invites = invite_allowance.bonus_invites + $2
+        RETURNING bonus_invites
+        "#
+    )
+    .bind(&body.account_id)
+    .bind(body.amount)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to grant invites: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    info!("Admin granted {} invites to {}, new bonus: {}", body.amount, body.account_id, new_bonus);
+
+    Ok(Json(GrantInvitesResponse {
+        success: true,
+        new_bonus,
+    }))
+}
+
+/// Admin: Register a seed user (without invite)
+#[derive(Debug, Deserialize)]
+struct SeedUserBody {
+    account_id: String,
+    base_invites: Option<i32>,
+}
+
+// ==================== Blacklist Types ====================
+
+#[derive(Debug, Deserialize)]
+struct BlacklistAddBody {
+    account_id: String,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlacklistRemoveBody {
+    account_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlacklistCheckQuery {
+    account_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BlacklistResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BlacklistCheckResponse {
+    blacklisted: bool,
+    reason: Option<String>,
+}
+
+// ==================== Stats Types ====================
+
+#[derive(Debug, Deserialize)]
+struct GetStatsQuery {
+    account_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct StatsResponse {
+    account_id: String,
+    emails_received: i32,
+    emails_sent: i32,
+    last_received_at: Option<String>,
+    last_sent_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SeedUserResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+async fn admin_seed_user(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SeedUserBody>,
+) -> Result<Json<SeedUserResponse>, StatusCode> {
+    let base_invites = body.base_invites.unwrap_or(3);
+
+    // Check if already registered
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM registered_users WHERE account_id = $1)"
+    )
+    .bind(&body.account_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if exists {
+        return Ok(Json(SeedUserResponse {
+            success: false,
+            error: Some("User already registered".to_string()),
+        }));
+    }
+
+    let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Register as seed user (no inviter)
+    sqlx::query(
+        "INSERT INTO registered_users (account_id) VALUES ($1)"
+    )
+    .bind(&body.account_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Create allowance
+    sqlx::query(
+        "INSERT INTO invite_allowance (account_id, base_invites) VALUES ($1, $2)"
+    )
+    .bind(&body.account_id)
+    .bind(base_invites)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    info!("Seed user {} registered with {} invites", body.account_id, base_invites);
+
+    Ok(Json(SeedUserResponse { success: true, error: None }))
+}
+
+// ==================== Blacklist Admin Handlers ====================
+
+/// Admin: Add account to blacklist
+async fn admin_blacklist_add(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BlacklistAddBody>,
+) -> Result<Json<BlacklistResponse>, StatusCode> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO blacklist (account_id, reason)
+        VALUES ($1, $2)
+        ON CONFLICT (account_id) DO UPDATE SET reason = $2
+        "#
+    )
+    .bind(&body.account_id)
+    .bind(&body.reason)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(_) => {
+            info!("Account {} added to blacklist: {:?}", body.account_id, body.reason);
+            Ok(Json(BlacklistResponse { success: true, error: None }))
+        }
+        Err(e) => {
+            error!("Failed to add to blacklist: {}", e);
+            Ok(Json(BlacklistResponse {
+                success: false,
+                error: Some(format!("Database error: {}", e)),
+            }))
+        }
+    }
+}
+
+/// Admin: Remove account from blacklist
+async fn admin_blacklist_remove(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BlacklistRemoveBody>,
+) -> Result<Json<BlacklistResponse>, StatusCode> {
+    let result = sqlx::query("DELETE FROM blacklist WHERE account_id = $1")
+        .bind(&body.account_id)
+        .execute(&state.db)
+        .await;
+
+    match result {
+        Ok(r) => {
+            if r.rows_affected() > 0 {
+                info!("Account {} removed from blacklist", body.account_id);
+                Ok(Json(BlacklistResponse { success: true, error: None }))
+            } else {
+                Ok(Json(BlacklistResponse {
+                    success: false,
+                    error: Some("Account not found in blacklist".to_string()),
+                }))
+            }
+        }
+        Err(e) => {
+            error!("Failed to remove from blacklist: {}", e);
+            Ok(Json(BlacklistResponse {
+                success: false,
+                error: Some(format!("Database error: {}", e)),
+            }))
+        }
+    }
+}
+
+/// Admin: Check if account is blacklisted
+async fn admin_blacklist_check(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BlacklistCheckQuery>,
+) -> Result<Json<BlacklistCheckResponse>, StatusCode> {
+    let result: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT reason FROM blacklist WHERE account_id = $1"
+    )
+    .bind(&query.account_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to check blacklist: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    match result {
+        Some(reason) => Ok(Json(BlacklistCheckResponse {
+            blacklisted: true,
+            reason,
+        })),
+        None => Ok(Json(BlacklistCheckResponse {
+            blacklisted: false,
+            reason: None,
+        })),
+    }
+}
+
+/// Admin: Get email stats for an account
+async fn admin_get_stats(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<GetStatsQuery>,
+) -> Result<Json<StatsResponse>, StatusCode> {
+    let result: Option<(i32, i32, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        r#"
+        SELECT emails_received, emails_sent, last_received_at, last_sent_at
+        FROM email_stats
+        WHERE account_id = $1
+        "#
+    )
+    .bind(&query.account_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to get stats: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    match result {
+        Some((received, sent, last_received, last_sent)) => Ok(Json(StatsResponse {
+            account_id: query.account_id,
+            emails_received: received,
+            emails_sent: sent,
+            last_received_at: last_received.map(|t| t.to_rfc3339()),
+            last_sent_at: last_sent.map(|t| t.to_rfc3339()),
+        })),
+        None => Ok(Json(StatsResponse {
+            account_id: query.account_id,
+            emails_received: 0,
+            emails_sent: 0,
+            last_received_at: None,
+            last_sent_at: None,
+        })),
+    }
 }
