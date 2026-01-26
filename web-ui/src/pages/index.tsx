@@ -318,6 +318,13 @@ export default function Home({ accounts, loading }: HomeProps) {
             Sign out
           </button>
         </div>
+
+        <p className="text-xs text-gray-400 mt-6">
+          Powered by{' '}
+          <a href="https://outlayer.fastnear.com" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">NEAR Outlayer</a>
+          {' '}&bull;{' '}
+          <a href="/docs" className="text-blue-500 hover:underline">How it works</a>
+        </p>
       </div>
     );
   }
@@ -327,9 +334,9 @@ export default function Home({ accounts, loading }: HomeProps) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-gradient-to-br from-gray-50 to-gray-100">
         <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-gray-900 mb-3">near.email</h1>
-          <p className="text-lg text-gray-500 max-w-sm">
-            Blockchain-native email for NEAR accounts
+          <h1 className="text-4xl font-bold text-gray-900 mb-2">near.email</h1>
+          <p className="text-lg text-gray-600 font-medium">
+            Blockchain-native email
           </p>
         </div>
 
@@ -342,8 +349,19 @@ export default function Home({ accounts, loading }: HomeProps) {
                 </svg>
               </div>
               <div>
-                <p className="text-sm font-medium text-gray-800">Your NEAR = Your email</p>
-                <p className="text-xs text-gray-400">alice.near = alice@near.email</p>
+                <p className="text-sm font-medium text-gray-800">Your wallet = your mailbox</p>
+                <p className="text-sm text-gray-600 font-mono">alice.near → alice@near.email</p>
+              </div>
+            </div>
+            <div className="flex items-start gap-3">
+              <div className="w-8 h-8 bg-cyan-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                <svg className="w-4 h-4 text-cyan-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-gray-800">Real email. Send to anyone.</p>
+                <p className="text-xs text-gray-500">Gmail, Outlook, any address works.</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
@@ -353,19 +371,19 @@ export default function Home({ accounts, loading }: HomeProps) {
                 </svg>
               </div>
               <div>
-                <p className="text-sm font-medium text-gray-800">End-to-end encrypted</p>
-                <p className="text-xs text-gray-400">Only you can read your emails</p>
+                <p className="text-sm font-medium text-gray-800">No one reads your mail. Ever.</p>
+                <p className="text-xs text-gray-500">No password. Only your wallet decrypts.</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <div className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center flex-shrink-0">
                 <svg className="w-4 h-4 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                 </svg>
               </div>
               <div>
-                <p className="text-sm font-medium text-gray-800">Instant setup</p>
-                <p className="text-xs text-gray-400">Just connect your wallet</p>
+                <p className="text-sm font-medium text-gray-800">TEE attestation on every action</p>
+                <p className="text-xs text-gray-500">Signed by Intel. Verifiable by anyone.</p>
               </div>
             </div>
           </div>
@@ -403,6 +421,66 @@ export default function Home({ accounts, loading }: HomeProps) {
           {' '}&bull;{' '}
           <a href="/docs" className="text-blue-500 hover:underline">How it works</a>
         </p>
+
+        {/* Payment Key input modal */}
+        {showPaymentKeyInput && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-xl p-4 w-full max-w-xl mx-4">
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                Configure Payment Key
+              </h3>
+              <p className="text-sm text-gray-500 mb-4">
+                Enter your Payment Key to use HTTPS API instead of blockchain transactions.
+                Create keys at{' '}
+                <a
+                  href="https://outlayer.fastnear.com"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-600 hover:underline"
+                >
+                  OutLayer Dashboard
+                </a>
+              </p>
+
+              {paymentKeyError && (
+                <div className="bg-red-50 text-red-700 px-3 py-2 rounded-lg text-sm mb-3 border border-red-100">
+                  {paymentKeyError}
+                </div>
+              )}
+
+              <input
+                type="text"
+                value={paymentKeyInput}
+                onChange={(e) => setPaymentKeyInput(e.target.value)}
+                placeholder="alice.near:0:abcd1234..."
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                onKeyDown={(e) => e.key === 'Enter' && handleSavePaymentKey()}
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                Format: owner:nonce:key
+              </p>
+
+              <div className="flex justify-end gap-2 mt-4">
+                <button
+                  onClick={() => {
+                    setShowPaymentKeyInput(false);
+                    setPaymentKeyInput('');
+                    setPaymentKeyError(null);
+                  }}
+                  className="px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSavePaymentKey}
+                  className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
