@@ -664,6 +664,18 @@ async fn send_email(
         }
     }
 
+    // Validate that from_account is not a subaccount
+    // Valid: alice.near, bob.testnet
+    // Invalid: sub.alice.near (subaccount)
+    if let Some(name_without_suffix) = body.from_account.strip_suffix(&state.account_suffix) {
+        if name_without_suffix.contains('.') {
+            return Ok(Json(SendResponse {
+                success: false,
+                error: Some("Subaccounts are not supported. Please use your main account.".to_string()),
+            }));
+        }
+    }
+
     // Log only metadata, not content (privacy)
     info!(
         "📤 Send email request: from={}, to={}, subject_len={}, body_len={}",

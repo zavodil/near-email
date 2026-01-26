@@ -239,9 +239,10 @@ export async function initWalletSelector(): Promise<WalletSelector> {
     ],
   });
 
-  modal = setupModal(selector, {
-    contractId: OUTLAYER_CONTRACT,
-  });
+  // Note: We intentionally omit contractId to prevent wallets from creating
+  // a function call access key during sign-in (saves gas). The app works
+  // without it since we use signAndSendTransaction which prompts for approval.
+  modal = setupModal(selector, {});
 
   return selector;
 }

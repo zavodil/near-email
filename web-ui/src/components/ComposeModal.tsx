@@ -1,6 +1,63 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import type { Attachment } from '@/lib/near';
 import { MAX_SEND_FILE_SIZE, MAX_SEND_TOTAL_SIZE } from '@/lib/near';
+
+// Network configuration
+const NETWORK_ID = process.env.NEXT_PUBLIC_NETWORK_ID || 'mainnet';
+const ACCOUNT_SUFFIX = NETWORK_ID === 'testnet' ? '.testnet' : '.near';
+const EMAIL_DOMAIN = 'near.email';
+
+// Validation status for the To field
+type ToStatus = 'idle' | 'checking' | 'valid' | 'invalid';
+
+// Check if string looks like an email
+function isEmailFormat(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+// Check if string looks like a NEAR account (without subaccount)
+// Valid: alice.near, bob.testnet
+// Invalid: sub.alice.near (subaccount)
+function isNearAccountFormat(value: string): boolean {
+  const suffix = ACCOUNT_SUFFIX;
+  if (!value.endsWith(suffix)) return false;
+
+  const nameWithoutSuffix = value.slice(0, -suffix.length);
+  // Should not contain dots (would be a subaccount)
+  if (nameWithoutSuffix.includes('.')) return false;
+  // Should be valid NEAR account name (lowercase alphanumeric, -, _)
+  return /^[a-z0-9_-]+$/.test(nameWithoutSuffix);
+}
+
+// Check if NEAR account exists via RPC
+async function checkNearAccountExists(accountId: string): Promise<boolean> {
+  const rpcUrl = NETWORK_ID === 'testnet'
+    ? 'https://rpc.testnet.near.org'
+    : 'https://rpc.mainnet.near.org';
+
+  try {
+    const response = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: '1',
+        method: 'query',
+        params: {
+          request_type: 'view_account',
+          finality: 'final',
+          account_id: accountId,
+        },
+      }),
+    });
+
+    const data = await response.json();
+    // If there's no error and result exists, account exists
+    return !data.error && data.result;
+  } catch {
+    return false;
+  }
+}
 
 interface ComposeModalProps {
   fromAddress: string;
@@ -31,6 +88,75 @@ export default function ComposeModal({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // To field validation state
+  const [toStatus, setToStatus] = useState<ToStatus>('idle');
+  const [toError, setToError] = useState<string | null>(null);
+
+  // Validate To field when it changes
+  useEffect(() => {
+    const value = to.trim().toLowerCase();
+
+    if (!value) {
+      setToStatus('idle');
+      setToError(null);
+      return;
+    }
+
+    // Check if it's an email format
+    if (isEmailFormat(value)) {
+      setToStatus('valid');
+      setToError(null);
+      return;
+    }
+
+    // Check if it looks like a subaccount (invalid)
+    if (value.endsWith(ACCOUNT_SUFFIX)) {
+      const nameWithoutSuffix = value.slice(0, -ACCOUNT_SUFFIX.length);
+      if (nameWithoutSuffix.includes('.')) {
+        setToStatus('invalid');
+        setToError('Subaccounts not supported. Use main account (e.g., alice' + ACCOUNT_SUFFIX + ')');
+        return;
+      }
+    }
+
+    // If looks like NEAR account format, we'll validate on blur
+    if (isNearAccountFormat(value)) {
+      setToStatus('idle');
+      setToError(null);
+      return;
+    }
+
+    // Unknown format - show hint
+    setToStatus('idle');
+    setToError(null);
+  }, [to]);
+
+  // Validate NEAR account on blur
+  async function handleToBlur() {
+    const value = to.trim().toLowerCase();
+
+    if (!value || isEmailFormat(value)) return;
+
+    if (isNearAccountFormat(value)) {
+      setToStatus('checking');
+      setToError(null);
+
+      const exists = await checkNearAccountExists(value);
+
+      if (exists) {
+        // Convert NEAR account to email format
+        const nameWithoutSuffix = value.slice(0, -ACCOUNT_SUFFIX.length);
+        const emailAddress = `${nameWithoutSuffix}@${EMAIL_DOMAIN}`;
+        setTo(emailAddress);
+        setToStatus('valid');
+        setToError(null);
+      } else {
+        setToStatus('invalid');
+        setToError(`Account "${value}" not found on NEAR ${NETWORK_ID}`);
+      }
+    }
+  }
 
   function formatSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -131,15 +257,47 @@ export default function ComposeModal({
             <span className="text-sm text-gray-600">{fromAddress}</span>
           </div>
 
-          <div className="flex items-center gap-2 py-1.5 border-b border-gray-100">
-            <label className="text-sm text-gray-400 w-14">To</label>
-            <input
-              type="email"
-              value={to}
-              onChange={(e) => setTo(e.target.value)}
-              placeholder="recipient@example.com"
-              className="flex-1 text-sm text-gray-900 placeholder-gray-300 focus:outline-none"
-            />
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 py-1.5 border-b border-gray-100">
+              <label className="text-sm text-gray-400 w-14">To</label>
+              <input
+                type="text"
+                value={to}
+                onChange={(e) => setTo(e.target.value)}
+                onBlur={handleToBlur}
+                placeholder={`email or NEAR account (e.g., alice${ACCOUNT_SUFFIX})`}
+                className={`flex-1 text-sm text-gray-900 placeholder-gray-300 focus:outline-none ${
+                  toStatus === 'invalid' ? 'text-red-600' : ''
+                }`}
+              />
+              {/* Validation indicator */}
+              {toStatus === 'checking' && (
+                <svg className="w-4 h-4 text-gray-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                </svg>
+              )}
+              {toStatus === 'valid' && (
+                <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+              {toStatus === 'invalid' && (
+                <svg className="w-4 h-4 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              )}
+            </div>
+            {/* Error message */}
+            {toError && (
+              <p className="text-xs text-red-500 pl-16">{toError}</p>
+            )}
+            {/* Hint (show only when idle and empty) */}
+            {toStatus === 'idle' && !to.trim() && (
+              <p className="text-xs text-gray-400 pl-16">
+                Enter email address or NEAR account (subaccounts not supported)
+              </p>
+            )}
           </div>
 
           <div className="flex items-center gap-2 py-1.5 border-b border-gray-100">
