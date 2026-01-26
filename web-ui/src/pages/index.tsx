@@ -317,6 +317,8 @@ export default function Home({ accounts, loading }: HomeProps) {
     const result = await sendEmail(to, subject, body, attachments);
     // Update state from fresh data returned by send
     updateFromResult(result);
+    // Show inbox after sending (server returns mail data)
+    setHasCheckedMail(true);
   }
 
   if (loading) {
