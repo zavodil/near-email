@@ -281,7 +281,14 @@ export default function Home({ accounts, loading }: HomeProps) {
           <div className="w-14 h-14 bg-gradient-to-br from-blue-400 to-blue-600 rounded-full flex items-center justify-center text-white text-xl font-bold mx-auto mb-4">
             {effectiveAccountId?.charAt(0).toUpperCase()}
           </div>
-          <p className="text-sm text-gray-500 mb-1">{paymentKeyEnabled ? 'Using Payment Key' : 'Connected as'}</p>
+          {paymentKeyEnabled ? (
+            <div className="flex items-center justify-center gap-1.5 mb-1">
+              <span className="text-xs font-medium text-green-700 bg-green-100 px-2 py-0.5 rounded-full">HTTPS Mode</span>
+              <span className="text-xs text-gray-400">higher limits</span>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500 mb-1">Connected as</p>
+          )}
           <p className="font-semibold text-gray-900 mb-1">{effectiveAccountId}</p>
           <p className="text-sm text-gray-400 mb-6">{emailAddress}</p>
 
@@ -398,7 +405,10 @@ export default function Home({ accounts, loading }: HomeProps) {
         </div>
 
         <p className="text-xs text-gray-400 mt-6">
-          Powered by NEAR blockchain
+          Powered by{' '}
+          <a href="https://outlayer.fastnear.com" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">NEAR Outlayer</a>
+          {' '}&bull;{' '}
+          <a href="/docs" className="text-blue-500 hover:underline">How it works</a>
         </p>
       </div>
     );
@@ -433,6 +443,16 @@ export default function Home({ accounts, loading }: HomeProps) {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
           </button>
+          {/* Docs link */}
+          <a
+            href="/docs"
+            className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+            title="Documentation"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+            </svg>
+          </a>
           {/* Account dropdown */}
           <div className="relative">
             <button
@@ -451,9 +471,14 @@ export default function Home({ accounts, loading }: HomeProps) {
               <div className="absolute right-0 mt-1 w-64 bg-white rounded-lg shadow-lg border border-gray-100 py-1 z-50">
                 {/* Current account info */}
                 <div className="px-3 py-2 border-b border-gray-100">
-                  <p className="text-xs text-gray-400">
-                    {paymentKeyEnabled ? 'Using Payment Key' : 'Signed in as'}
-                  </p>
+                  {paymentKeyEnabled ? (
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className="text-[10px] font-medium text-green-700 bg-green-100 px-1.5 py-0.5 rounded">HTTPS</span>
+                      <span className="text-[10px] text-gray-400">18 MB attachments</span>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-gray-400">Signed in as</p>
+                  )}
                   <p className="text-sm font-medium text-gray-700 truncate">{effectiveAccountId}</p>
                 </div>
 
