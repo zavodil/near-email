@@ -67,6 +67,9 @@ const OUTLAYER_API_URL = process.env.NEXT_PUBLIC_OUTLAYER_API_URL || 'https://ou
 const PAYMENT_KEY_STORAGE = 'near-email-payment-key';
 const PAYMENT_KEY_ENABLED_STORAGE = 'near-email-payment-key-enabled';
 
+// Send pubkey localStorage key (per-account, deterministic - can be cached)
+const SEND_PUBKEY_STORAGE = 'near-email-send-pubkey';
+
 // Max output size limits (in bytes)
 // Transaction mode limited by blockchain (~1.5MB safe)
 // HTTPS mode can handle much more (25MB reasonable for browser/memory)
@@ -104,7 +107,47 @@ let modal: ReturnType<typeof setupModal> | null = null;
 
 // Cached send pubkey for encrypting outgoing emails
 // Set by getEmails(), required by sendEmail()
+// Also persisted to localStorage (per-account, deterministic key)
 let cachedSendPubkey: string | null = null;
+let cachedSendPubkeyAccount: string | null = null; // account_id for current cached pubkey
+
+// Get send pubkey from localStorage for a specific account
+function getStoredSendPubkey(accountId: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const stored = localStorage.getItem(SEND_PUBKEY_STORAGE);
+    if (!stored) return null;
+    const data = JSON.parse(stored);
+    // Check if stored pubkey is for this account
+    if (data.account_id === accountId && data.pubkey) {
+      return data.pubkey;
+    }
+  } catch {
+    // Invalid data, ignore
+  }
+  return null;
+}
+
+// Save send pubkey to localStorage
+function storeSendPubkey(accountId: string, pubkey: string): void {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(SEND_PUBKEY_STORAGE, JSON.stringify({
+    account_id: accountId,
+    pubkey,
+  }));
+}
+
+// Initialize send pubkey from localStorage (call on page load with current account)
+export function initSendPubkey(accountId: string): boolean {
+  const stored = getStoredSendPubkey(accountId);
+  if (stored) {
+    cachedSendPubkey = stored;
+    cachedSendPubkeyAccount = accountId;
+    console.log('Restored send_pubkey from localStorage for', accountId);
+    return true;
+  }
+  return false;
+}
 
 // Cached ephemeral key for requests that return encrypted data
 let cachedEphemeralKey: PrivateKey | null = null;
@@ -168,6 +211,7 @@ export function setPaymentKey(key: string | null): boolean {
     localStorage.removeItem(PAYMENT_KEY_ENABLED_STORAGE);
     // Clear cached data since user identity changes
     cachedSendPubkey = null;
+    cachedSendPubkeyAccount = null;
     return true;
   }
 
@@ -183,6 +227,7 @@ export function setPaymentKey(key: string | null): boolean {
   localStorage.setItem(PAYMENT_KEY_ENABLED_STORAGE, 'true');
   // Clear cached data since user identity changes
   cachedSendPubkey = null;
+  cachedSendPubkeyAccount = null;
   return true;
 }
 
@@ -196,6 +241,7 @@ export function setPaymentKeyEnabled(enabled: boolean): void {
   }
   // Clear cached data since user identity may change
   cachedSendPubkey = null;
+  cachedSendPubkeyAccount = null;
 }
 
 // Get current payment key config for UI
@@ -264,6 +310,9 @@ export async function signOut(): Promise<void> {
   if (!selector) return;
   const wallet = await selector.wallet();
   await wallet.signOut();
+  // Clear cached pubkey (user identity changed)
+  cachedSendPubkey = null;
+  cachedSendPubkeyAccount = null;
 }
 
 // Call OutLayer via HTTPS API (Payment Key mode)
@@ -519,7 +568,15 @@ export async function getEmails(
   // Save send_pubkey for encrypting outgoing emails
   if (result.send_pubkey) {
     cachedSendPubkey = result.send_pubkey;
-    console.log('🔑 Cached send_pubkey for outgoing emails');
+    // Persist to localStorage for this account
+    const currentAccount = isPaymentKeyMode()
+      ? paymentKeyConfig.owner
+      : (await getAccounts())[0]?.accountId;
+    if (currentAccount) {
+      storeSendPubkey(currentAccount, result.send_pubkey);
+      cachedSendPubkeyAccount = currentAccount;
+      console.log('🔑 Cached send_pubkey for', currentAccount);
+    }
   }
 
   // Decrypt the response with ephemeral private key

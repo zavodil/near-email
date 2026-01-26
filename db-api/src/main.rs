@@ -2279,37 +2279,44 @@ async fn send_invite_email(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Build email - strip suffix from account
-    let from_local = body.account_id
-        .strip_suffix(&state.account_suffix)
-        .unwrap_or(&body.account_id);
-
-    let subject = format!("{} invites you to near.email", from_local);
+    // Build email - use full account_id for clarity
+    let subject = format!("{} invites you to near.email", body.account_id);
     let invite_link = format!("https://near.email?invite={}", code);
+
+    // Calculate days until expiry
+    let expires_in_days = chrono::DateTime::parse_from_rfc3339(&expires_at)
+        .or_else(|_| chrono::DateTime::parse_from_str(&expires_at, "%Y-%m-%dT%H:%M:%S%.f"))
+        .map(|exp| {
+            let now = chrono::Utc::now();
+            let days = (exp.signed_duration_since(now).num_hours() + 23) / 24; // round up
+            if days <= 1 { "1 day".to_string() } else { format!("{} days", days) }
+        })
+        .unwrap_or_else(|_| "7 days".to_string());
 
     let email_body = format!(
         r#"Hi!
 
-{} has invited you to join near.email - blockchain-native secure email.
+{} has invited you to join near.email - a blockchain-native secure email service.
 
 Your invite code: {}
 
-Or click this link to get started:
+Click this link to get started:
 {}
 
-This invite expires on {}.
+This invite expires in {}.
+
+---
 
 What is near.email?
-- Your NEAR wallet = your email (alice.near -> alice@near.email)
-- End-to-end encrypted - only you can read your mail
-- Send to anyone - Gmail, Outlook, any address works
+
+- Your NEAR wallet IS your email address (alice.near -> alice@near.email)
+- End-to-end encrypted - only you can read your emails
+- Send to anyone - works with Gmail, Outlook, any email address
 - Powered by TEE (Trusted Execution Environment) for maximum security
+- No passwords, no signups - just connect your NEAR wallet
 
-Get started at https://near.email
-
---
-Sent via near.email"#,
-        from_local, code, invite_link, expires_at
+Get started at https://near.email"#,
+        body.account_id, code, invite_link, expires_in_days
     );
 
     // Send the email using existing send_email logic
