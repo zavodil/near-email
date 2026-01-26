@@ -76,6 +76,8 @@ services:
       API_SECRET: ${API_SECRET}
       # FastNEAR API for public key ownership verification (testnet)
       FASTNEAR_API_URL: ${FASTNEAR_API_URL:-https://test.api.fastnear.com}
+      # NEAR RPC URL for fallback verification (optional - auto-detects if not set)
+      NEAR_RPC_URL: ${NEAR_RPC_URL:-}
     # ports not needed with network_mode: host (8080 exposed directly)
     depends_on:
       postgres:

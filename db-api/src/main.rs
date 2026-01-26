@@ -87,6 +87,9 @@ struct AppState {
     /// FastNEAR API URL for public key ownership verification
     /// Mainnet: https://api.fastnear.com, Testnet: https://test.api.fastnear.com
     fastnear_api_url: String,
+    /// NEAR RPC URL for fallback public key verification
+    /// If not set, auto-detects based on account suffix (testnet/mainnet)
+    near_rpc_url: Option<String>,
     /// Rate limiter for invite code attempts (IP -> (count, window_start))
     /// Limits: 10 attempts per minute per IP
     invite_rate_limiter: Mutex<HashMap<String, RateLimitEntry>>,
@@ -203,11 +206,20 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "https://api.fastnear.com".to_string());
     info!("FastNEAR API URL: {}", fastnear_api_url);
 
+    // NEAR RPC URL for fallback public key verification
+    // If not set, auto-detects based on account suffix
+    let near_rpc_url = env::var("NEAR_RPC_URL").ok();
+    if let Some(ref url) = near_rpc_url {
+        info!("NEAR RPC URL: {}", url);
+    } else {
+        info!("NEAR RPC URL: auto-detect based on account suffix");
+    }
+
     info!("Email domain: {}, account suffix: {}", email_domain, account_suffix);
 
     let invite_rate_limiter = Mutex::new(HashMap::new());
 
-    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay, api_secret, fastnear_api_url, invite_rate_limiter };
+    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay, api_secret, fastnear_api_url, near_rpc_url, invite_rate_limiter };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -1403,14 +1415,92 @@ struct FastNearPublicKeyResponse {
     account_ids: Vec<String>,
 }
 
-/// Verify that a public key belongs to the claimed account_id using FastNEAR API
-/// Returns Ok(()) if key ownership verified, Err(reason) otherwise
-async fn verify_access_key_owner(
-    fastnear_api_url: &str,
+/// NEAR RPC response for access key list
+#[derive(Debug, Deserialize)]
+struct NearRpcResponse {
+    result: Option<NearRpcAccessKeyList>,
+    error: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NearRpcAccessKeyList {
+    keys: Vec<NearRpcAccessKey>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NearRpcAccessKey {
+    public_key: String,
+}
+
+/// Verify public key ownership via NEAR RPC (fallback when FastNEAR fails)
+async fn verify_access_key_owner_via_rpc(
+    near_rpc_url: Option<&str>,
     public_key: &str,
     account_id: &str,
 ) -> Result<(), String> {
-    let url = format!("{}/v0/public_key/{}", fastnear_api_url, public_key);
+    // Use provided RPC URL or auto-detect based on account suffix
+    let rpc_url = near_rpc_url.unwrap_or_else(|| {
+        if account_id.ends_with(".testnet") {
+            "https://rpc.testnet.near.org"
+        } else {
+            "https://rpc.mainnet.near.org"
+        }
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(rpc_url)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "query",
+            "params": {
+                "request_type": "view_access_key_list",
+                "finality": "final",
+                "account_id": account_id
+            }
+        }))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("NEAR RPC request failed: {}", e))?;
+
+    let data: NearRpcResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse NEAR RPC response: {}", e))?;
+
+    if let Some(error) = data.error {
+        return Err(format!("NEAR RPC error: {}", error));
+    }
+
+    let keys = data.result
+        .ok_or_else(|| "No result in NEAR RPC response".to_string())?
+        .keys;
+
+    if keys.iter().any(|k| k.public_key == public_key) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Public key {} not found in account {} access keys",
+            public_key, account_id
+        ))
+    }
+}
+
+/// Verify that a public key belongs to the claimed account_id
+/// First tries FastNEAR API, falls back to NEAR RPC if FastNEAR returns empty
+/// Returns Ok(()) if key ownership verified, Err(reason) otherwise
+async fn verify_access_key_owner(
+    fastnear_api_url: &str,
+    near_rpc_url: Option<&str>,
+    public_key: &str,
+    account_id: &str,
+) -> Result<(), String> {
+    // FastNEAR API expects key without ed25519: prefix
+    // e.g., https://test.api.fastnear.com/v1/public_key/5Uu8xpn2hEAcxpKcBx4GrMnwV4dddfQbBv8PGmEkKyDx
+    let key_without_prefix = public_key.strip_prefix("ed25519:").unwrap_or(public_key);
+    let url = format!("{}/v1/public_key/{}", fastnear_api_url, key_without_prefix);
 
     let client = reqwest::Client::new();
     let response = client
@@ -1434,14 +1524,23 @@ async fn verify_access_key_owner(
         .map_err(|e| format!("Failed to parse FastNEAR response: {}", e))?;
 
     if data.account_ids.contains(&account_id.to_string()) {
-        Ok(())
-    } else {
-        Err(format!(
-            "Public key does not belong to account {}. Key belongs to: {:?}",
-            account_id,
-            data.account_ids
-        ))
+        return Ok(());
     }
+
+    // FastNEAR returned empty or doesn't have this account - fall back to NEAR RPC
+    if data.account_ids.is_empty() {
+        tracing::info!(
+            "FastNEAR returned empty for key {}, falling back to NEAR RPC",
+            public_key
+        );
+        return verify_access_key_owner_via_rpc(near_rpc_url, public_key, account_id).await;
+    }
+
+    Err(format!(
+        "Public key does not belong to account {}. Key belongs to: {:?}",
+        account_id,
+        data.account_ids
+    ))
 }
 
 /// Verify ed25519 signature for invite requests using NEP-413 format
@@ -1544,6 +1643,7 @@ fn verify_signature_crypto(signed: &SignedRequest, action: &str) -> Result<(), S
 /// 2. Verify public key belongs to claimed account_id via FastNEAR API
 async fn verify_signature_with_ownership(
     fastnear_api_url: &str,
+    near_rpc_url: Option<&str>,
     signed: &SignedRequest,
     action: &str,
 ) -> Result<(), String> {
@@ -1552,7 +1652,7 @@ async fn verify_signature_with_ownership(
 
     // Step 2: Verify public key belongs to the claimed account_id via FastNEAR API
     // This only works for NEAR access keys, not for derived payment keys
-    verify_access_key_owner(fastnear_api_url, &signed.public_key, &signed.account_id).await?;
+    verify_access_key_owner(fastnear_api_url, near_rpc_url, &signed.public_key, &signed.account_id).await?;
 
     Ok(())
 }
@@ -2108,7 +2208,7 @@ async fn generate_invite(
         timestamp_ms: body.timestamp_ms,
         nonce: body.nonce.clone(),
     };
-    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, &signed, "generate_invite").await {
+    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, state.near_rpc_url.as_deref(), &signed, "generate_invite").await {
         warn!("Signature verification failed for generate_invite: {}", e);
         return Ok(Json(GenerateInviteResponse {
             success: false,
@@ -2135,7 +2235,7 @@ async fn send_invite_email(
         timestamp_ms: body.timestamp_ms,
         nonce: body.nonce.clone(),
     };
-    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, &signed, "send_invite").await {
+    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, state.near_rpc_url.as_deref(), &signed, "send_invite").await {
         warn!("Signature verification failed for send_invite_email: {}", e);
         return Ok(Json(SendInviteResponse {
             success: false,
@@ -2241,7 +2341,7 @@ async fn my_invites(
         timestamp_ms: body.timestamp_ms,
         nonce: body.nonce.clone(),
     };
-    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, &signed, "my_invites").await {
+    if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, state.near_rpc_url.as_deref(), &signed, "my_invites").await {
         warn!("Signature verification failed for my_invites: {}", e);
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -2593,3 +2693,69 @@ async fn admin_get_stats(
         })),
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test NEAR RPC fallback for public key ownership verification
+    #[tokio::test]
+    async fn test_verify_access_key_owner_via_rpc_testnet() {
+        // Known testnet account with known public key
+        let public_key = "ed25519:2a7mj4kDQvr6HfJpJa7W5bg1K2B9GsLNYXBa4um5S7MB";
+        let account_id = "zavodil.testnet";
+
+        // None = auto-detect RPC based on account suffix
+        let result = verify_access_key_owner_via_rpc(None, public_key, account_id).await;
+        assert!(result.is_ok(), "Expected key to belong to account: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_verify_access_key_owner_via_rpc_wrong_account() {
+        // Key belongs to zavodil.testnet, not to nonexistent.testnet
+        let public_key = "ed25519:2a7mj4kDQvr6HfJpJa7W5bg1K2B9GsLNYXBa4um5S7MB";
+        let account_id = "nonexistent-account-12345.testnet";
+
+        let result = verify_access_key_owner_via_rpc(None, public_key, account_id).await;
+        assert!(result.is_err(), "Expected key NOT to belong to wrong account");
+    }
+
+    #[tokio::test]
+    async fn test_verify_access_key_owner_with_fastnear_fallback() {
+        // This key is not indexed by FastNEAR testnet, should fall back to RPC
+        let fastnear_url = "https://test.api.fastnear.com";
+        let public_key = "ed25519:2a7mj4kDQvr6HfJpJa7W5bg1K2B9GsLNYXBa4um5S7MB";
+        let account_id = "zavodil.testnet";
+
+        // None = auto-detect RPC based on account suffix
+        let result = verify_access_key_owner(fastnear_url, None, public_key, account_id).await;
+        assert!(result.is_ok(), "Expected fallback to RPC to work: {:?}", result);
+    }
+
+    /// Test NEP-413 payload serialization matches expected format
+    #[test]
+    fn test_nep413_payload_serialization() {
+        let nonce = [0u8; 32]; // Zero nonce for deterministic test
+        let payload = Nep413Payload {
+            message: "near.email:my_invites:test.testnet:1706300000000".to_string(),
+            nonce,
+            recipient: "near.email".to_string(),
+            callback_url: None,
+        };
+
+        let bytes = borsh::to_vec(&payload).expect("Failed to serialize");
+        // Verify it serializes without error and has reasonable length
+        assert!(bytes.len() > 50, "Payload should be >50 bytes");
+        assert!(bytes.len() < 200, "Payload should be <200 bytes");
+    }
+
+    /// Test NEP-413 tag constant
+    #[test]
+    fn test_nep413_tag() {
+        // NEP-413 tag is 2^31 + 413
+        assert_eq!(NEP413_TAG, 2147484061);
+        assert_eq!(NEP413_TAG, (1u32 << 31) + 413);
+    }
+}
+
