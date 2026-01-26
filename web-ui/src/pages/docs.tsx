@@ -5,7 +5,7 @@ export default function DocsPage() {
   return (
     <>
       <Head>
-        <title>How near.email Works | Documentation</title>
+        <title>How near.email works | Documentation</title>
         <meta name="description" content="Learn how near.email provides secure, private blockchain-based email for NEAR accounts" />
       </Head>
 
@@ -28,7 +28,7 @@ export default function DocsPage() {
         {/* Content */}
         <main className="max-w-3xl mx-auto px-4 py-8">
           <h1 className="text-3xl font-bold text-gray-900 mb-2">
-            How near.email Works
+            How near.email works
           </h1>
           <p className="text-lg text-gray-500 mb-8">
             Secure, private email for the NEAR ecosystem
@@ -325,13 +325,13 @@ export default function DocsPage() {
               </div>
 
               <div className="flex gap-4">
-                <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center text-green-600 font-bold flex-shrink-0">2</div>
+                <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold flex-shrink-0">2</div>
                 <div>
-                  <h3 className="font-semibold text-gray-900">Internal Email (NEAR → NEAR)</h3>
+                  <h3 className="font-semibold text-gray-900">Sending Email</h3>
                   <p className="text-gray-600 text-sm">
-                    When alice@near.email sends to bob@near.email, <strong>no external SMTP is involved</strong>.
-                    The email is encrypted for bob.near&apos;s key directly inside the TEE and stored. This is faster,
-                    more private, and leaves no trace on external mail servers.
+                    You compose an email normally. If the recipient is a NEAR account (bob@near.email), the email
+                    is encrypted and stored directly &mdash; <strong>no external servers involved</strong>, no trace left outside.
+                    If sending to Gmail/Outlook, the TEE sends it via SMTP and keeps an encrypted copy in your Sent folder.
                   </p>
                 </div>
               </div>
@@ -344,17 +344,6 @@ export default function DocsPage() {
                     When you connect your wallet and request emails, you sign a message proving you own your account.
                     The TEE decrypts emails using your derived key and re-encrypts them for secure transmission to your browser.
                     <strong> Without your NEAR account, no one can access your emails</strong> &mdash; not even us.
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex gap-4">
-                <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold flex-shrink-0">4</div>
-                <div>
-                  <h3 className="font-semibold text-gray-900">Sending External Email</h3>
-                  <p className="text-gray-600 text-sm">
-                    When sending to Gmail/Outlook, you compose in browser, encrypt client-side, and sign a transaction.
-                    The TEE decrypts it, sends via SMTP to the external server, and stores an encrypted copy in your Sent folder.
                   </p>
                 </div>
               </div>
