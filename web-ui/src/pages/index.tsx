@@ -432,6 +432,28 @@ export default function Home({ accounts, loading }: HomeProps) {
           {' '}&bull;{' '}
           <a href="/docs" className="text-blue-500 hover:underline">How it works</a>
         </p>
+
+        {/* Compose modal (for early compose before checking mail) */}
+        {showCompose && (
+          <ComposeModal
+            fromAddress={emailAddress!}
+            onClose={() => setShowCompose(false)}
+            onSent={handleSend}
+            onSuccess={() => showToast('Email sent successfully!')}
+            initialTo={replyTo}
+            initialSubject={replySubject}
+            initialBody={replyBody}
+          />
+        )}
+
+        {/* Toast notification */}
+        {toast && (
+          <Toast
+            message={toast.message}
+            type={toast.type}
+            onClose={() => setToast(null)}
+          />
+        )}
       </div>
     );
   }

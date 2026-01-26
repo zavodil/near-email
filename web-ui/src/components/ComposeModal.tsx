@@ -5,6 +5,9 @@ import { MAX_SEND_FILE_SIZE, MAX_SEND_TOTAL_SIZE } from '@/lib/near';
 // Network configuration
 const NETWORK_ID = process.env.NEXT_PUBLIC_NETWORK_ID || 'mainnet';
 const ACCOUNT_SUFFIX = NETWORK_ID === 'testnet' ? '.testnet' : '.near';
+const FASTNEAR_RPC_URL = NETWORK_ID === 'testnet'
+  ? 'https://rpc.testnet.fastnear.com'
+  : 'https://free.rpc.fastnear.com';
 const EMAIL_DOMAIN = 'near.email';
 
 // Validation status for the To field
@@ -29,14 +32,19 @@ function isNearAccountFormat(value: string): boolean {
   return /^[a-z0-9_-]+$/.test(nameWithoutSuffix);
 }
 
-// Check if NEAR account exists via RPC
-async function checkNearAccountExists(accountId: string): Promise<boolean> {
-  const rpcUrl = NETWORK_ID === 'testnet'
-    ? 'https://rpc.testnet.near.org'
-    : 'https://rpc.mainnet.near.org';
+// Check if string looks like an account with unrecognized suffix (like .something)
+function hasUnrecognizedSuffix(value: string): boolean {
+  // Must contain a dot but not end with recognized suffixes
+  if (!value.includes('.')) return false;
+  if (value.endsWith('.near') || value.endsWith('.testnet')) return false;
+  // Check if it looks like account.suffix format (no @ sign, alphanumeric with dots)
+  return /^[a-z0-9_-]+\.[a-z0-9_-]+$/i.test(value);
+}
 
+// Check if NEAR account exists via FastNEAR RPC (CORS-friendly)
+async function checkNearAccountExists(accountId: string): Promise<boolean> {
   try {
-    const response = await fetch(rpcUrl, {
+    const response = await fetch(FASTNEAR_RPC_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -124,6 +132,13 @@ export default function ComposeModal({
     if (isNearAccountFormat(value)) {
       setToStatus('idle');
       setToError(null);
+      return;
+    }
+
+    // Check for unrecognized suffix (e.g., alice.something instead of alice.near)
+    if (hasUnrecognizedSuffix(value)) {
+      setToStatus('invalid');
+      setToError(`Unknown suffix. Use ${ACCOUNT_SUFFIX} or full email address`);
       return;
     }
 
