@@ -758,8 +758,9 @@ export interface MyInvitesResult {
 // Signature data for authenticated invite requests
 interface SignedInviteData {
   signature: string;  // base64 encoded
-  public_key: string; // ed25519:xxx format or base64
+  public_key: string; // ed25519:xxx format
   timestamp_ms: number;
+  nonce: string;      // base64 encoded 32-byte nonce (needed for NEP-413 verification)
 }
 
 // Sign a message for invite authentication using wallet (NEP-413)
@@ -810,10 +811,14 @@ async function signInviteMessage(action: string, accountId: string): Promise<Sig
       return null;
     }
 
+    // Convert nonce to base64
+    const nonceBase64 = btoa(String.fromCharCode(...nonceBytes));
+
     return {
       signature: signatureBase64,
       public_key: result.publicKey,
       timestamp_ms,
+      nonce: nonceBase64,
     };
   } catch (e) {
     console.error('Wallet signing failed:', e);
@@ -847,7 +852,7 @@ export async function useInviteCode(code: string, accountId: string): Promise<Us
 export async function generateInviteCode(accountId: string): Promise<GenerateInviteResult> {
   const signed = await signInviteMessage('generate_invite', accountId);
   if (!signed) {
-    return { success: false, error: 'Failed to sign request. Please connect wallet or use payment key.' };
+    return { success: false, error: 'Failed to sign request. Please connect wallet.' };
   }
 
   const response = await fetch(`${DB_API_URL}/invites/generate`, {
@@ -858,6 +863,7 @@ export async function generateInviteCode(accountId: string): Promise<GenerateInv
       signature: signed.signature,
       public_key: signed.public_key,
       timestamp_ms: signed.timestamp_ms,
+      nonce: signed.nonce,
     }),
   });
   if (!response.ok) {
@@ -870,7 +876,7 @@ export async function generateInviteCode(accountId: string): Promise<GenerateInv
 export async function sendInviteEmail(accountId: string, recipientEmail: string): Promise<SendInviteResult> {
   const signed = await signInviteMessage('send_invite', accountId);
   if (!signed) {
-    return { success: false, error: 'Failed to sign request. Please connect wallet or use payment key.' };
+    return { success: false, error: 'Failed to sign request. Please connect wallet.' };
   }
 
   const response = await fetch(`${DB_API_URL}/invites/send-email`, {
@@ -882,6 +888,7 @@ export async function sendInviteEmail(accountId: string, recipientEmail: string)
       signature: signed.signature,
       public_key: signed.public_key,
       timestamp_ms: signed.timestamp_ms,
+      nonce: signed.nonce,
     }),
   });
   if (!response.ok) {
@@ -894,7 +901,7 @@ export async function sendInviteEmail(accountId: string, recipientEmail: string)
 export async function getMyInvites(accountId: string): Promise<MyInvitesResult> {
   const signed = await signInviteMessage('my_invites', accountId);
   if (!signed) {
-    throw new Error('Failed to sign request. Please connect wallet or use payment key.');
+    throw new Error('Failed to sign request. Please connect wallet.');
   }
 
   const response = await fetch(`${DB_API_URL}/invites/my`, {
@@ -905,6 +912,7 @@ export async function getMyInvites(accountId: string): Promise<MyInvitesResult> 
       signature: signed.signature,
       public_key: signed.public_key,
       timestamp_ms: signed.timestamp_ms,
+      nonce: signed.nonce,
     }),
   });
   if (!response.ok) {

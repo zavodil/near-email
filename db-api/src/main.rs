@@ -43,6 +43,7 @@ use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use uuid::Uuid;
 use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+use sha2::{Sha256, Digest};
 
 /// DKIM configuration for signing outgoing emails
 struct DkimConfig {
@@ -1364,18 +1365,37 @@ struct CheckUserResponse {
 
 // ==================== Signature Verification ====================
 
-/// Signed request for invite operations
+/// Signed request for invite operations (NEP-413 format)
 /// Message format: "near.email:{action}:{account_id}:{timestamp_ms}"
 #[derive(Debug, Deserialize)]
 struct SignedRequest {
     account_id: String,
     /// Base64 encoded ed25519 signature
     signature: String,
-    /// Public key in NEAR format (ed25519:xxx) or base64
+    /// Public key in NEAR format (ed25519:xxx)
     public_key: String,
     /// Timestamp in milliseconds (for replay protection)
     timestamp_ms: u64,
+    /// Base64 encoded 32-byte nonce (required for NEP-413 verification)
+    nonce: String,
 }
+
+/// NEP-413 payload structure for Borsh serialization
+/// See: https://github.com/near/NEPs/blob/master/neps/nep-0413.md
+#[derive(borsh::BorshSerialize)]
+struct Nep413Payload {
+    /// The message that was requested to be signed
+    message: String,
+    /// 32-byte nonce
+    nonce: [u8; 32],
+    /// The recipient to whom the signature is intended for
+    recipient: String,
+    /// Optional callback URL (always None for our use case)
+    callback_url: Option<String>,
+}
+
+/// NEP-413 tag: 2^31 + 413
+const NEP413_TAG: u32 = 2147484061;
 
 /// Response from FastNEAR API for public key lookup
 #[derive(Debug, Deserialize)]
@@ -1424,7 +1444,8 @@ async fn verify_access_key_owner(
     }
 }
 
-/// Verify ed25519 signature for invite requests (cryptographic verification only)
+/// Verify ed25519 signature for invite requests using NEP-413 format
+/// NEP-413 specifies that the signed payload is: SHA256(NEP413_TAG || Borsh(Nep413Payload))
 /// Returns Ok(()) if signature is valid, Err(reason) otherwise
 fn verify_signature_crypto(signed: &SignedRequest, action: &str) -> Result<(), String> {
     // Check timestamp (allow 1 hour window)
@@ -1437,25 +1458,38 @@ fn verify_signature_crypto(signed: &SignedRequest, action: &str) -> Result<(), S
         return Err("Signature expired".to_string());
     }
 
-    // Parse public key (handle NEAR format ed25519:xxx or raw base64)
-    let pubkey_bytes = if signed.public_key.starts_with("ed25519:") {
-        // NEAR format: ed25519:BASE58_KEY
-        let key_str = signed.public_key.strip_prefix("ed25519:").unwrap();
-        bs58::decode(key_str)
-            .into_vec()
-            .map_err(|e| format!("Invalid public key base58: {}", e))?
-    } else {
-        // Raw base64
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &signed.public_key)
-            .map_err(|e| format!("Invalid public key base64: {}", e))?
-    };
+    // Parse public key (format: "ed25519:base58...")
+    let pubkey_parts: Vec<&str> = signed.public_key.split(':').collect();
+    if pubkey_parts.len() != 2 || pubkey_parts[0] != "ed25519" {
+        return Err("Invalid public key format, expected 'ed25519:base58...'".to_string());
+    }
+
+    let pubkey_bytes = bs58::decode(pubkey_parts[1])
+        .into_vec()
+        .map_err(|e| format!("Failed to decode public key: {}", e))?;
 
     if pubkey_bytes.len() != 32 {
         return Err(format!("Invalid public key length: {} (expected 32)", pubkey_bytes.len()));
     }
 
-    let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes.try_into().unwrap())
-        .map_err(|e| format!("Invalid public key: {}", e))?;
+    // Decode signature (base64)
+    let sig_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &signed.signature)
+        .map_err(|e| format!("Failed to decode signature: {}", e))?;
+
+    if sig_bytes.len() != 64 {
+        return Err(format!("Invalid signature length: {} (expected 64)", sig_bytes.len()));
+    }
+
+    // Decode nonce (base64) - must be exactly 32 bytes
+    let nonce_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &signed.nonce)
+        .map_err(|e| format!("Failed to decode nonce: {}", e))?;
+
+    if nonce_bytes.len() != 32 {
+        return Err(format!("Invalid nonce length: {} (expected 32)", nonce_bytes.len()));
+    }
+
+    let nonce_array: [u8; 32] = nonce_bytes.try_into()
+        .map_err(|_| "Failed to convert nonce to array".to_string())?;
 
     // Build message
     let message = format!(
@@ -1463,19 +1497,40 @@ fn verify_signature_crypto(signed: &SignedRequest, action: &str) -> Result<(), S
         action, signed.account_id, signed.timestamp_ms
     );
 
-    // Decode signature
-    let sig_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &signed.signature)
-        .map_err(|e| format!("Invalid signature base64: {}", e))?;
+    // Build NEP-413 payload
+    let payload = Nep413Payload {
+        message,
+        nonce: nonce_array,
+        recipient: "near.email".to_string(),
+        callback_url: None,
+    };
 
-    if sig_bytes.len() != 64 {
-        return Err(format!("Invalid signature length: {} (expected 64)", sig_bytes.len()));
-    }
+    // Serialize payload with Borsh
+    let payload_bytes = borsh::to_vec(&payload)
+        .map_err(|e| format!("Failed to serialize NEP-413 payload: {}", e))?;
 
-    let signature = Signature::from_bytes(&sig_bytes.try_into().unwrap());
+    // Build final message: tag (4 bytes LE) + payload
+    let mut to_hash = Vec::with_capacity(4 + payload_bytes.len());
+    to_hash.extend_from_slice(&NEP413_TAG.to_le_bytes());
+    to_hash.extend_from_slice(&payload_bytes);
 
-    // Verify
+    // SHA256 hash the combined data
+    let hash = Sha256::digest(&to_hash);
+
+    // Verify using ed25519
+    let verifying_key = VerifyingKey::from_bytes(
+        &<[u8; 32]>::try_from(pubkey_bytes.as_slice())
+            .map_err(|_| "Invalid public key bytes".to_string())?
+    ).map_err(|e| format!("Invalid public key: {}", e))?;
+
+    let signature = Signature::from_bytes(
+        &<[u8; 64]>::try_from(sig_bytes.as_slice())
+            .map_err(|_| "Invalid signature bytes".to_string())?
+    );
+
+    // Verify signature against the hash
     verifying_key
-        .verify(message.as_bytes(), &signature)
+        .verify(&hash, &signature)
         .map_err(|_| "Signature verification failed".to_string())?;
 
     Ok(())
@@ -1522,10 +1577,12 @@ struct GenerateInviteBody {
     account_id: String,
     /// Base64 encoded ed25519 signature
     signature: String,
-    /// Public key in NEAR format (ed25519:xxx) or base64
+    /// Public key in NEAR format (ed25519:xxx)
     public_key: String,
     /// Timestamp in milliseconds
     timestamp_ms: u64,
+    /// Base64 encoded 32-byte nonce
+    nonce: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1545,10 +1602,12 @@ struct SendInviteBody {
     recipient_email: String,
     /// Base64 encoded ed25519 signature
     signature: String,
-    /// Public key in NEAR format (ed25519:xxx) or base64
+    /// Public key in NEAR format (ed25519:xxx)
     public_key: String,
     /// Timestamp in milliseconds
     timestamp_ms: u64,
+    /// Base64 encoded 32-byte nonce
+    nonce: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1565,10 +1624,12 @@ struct MyInvitesBody {
     account_id: String,
     /// Base64 encoded ed25519 signature
     signature: String,
-    /// Public key in NEAR format (ed25519:xxx) or base64
+    /// Public key in NEAR format (ed25519:xxx)
     public_key: String,
     /// Timestamp in milliseconds
     timestamp_ms: u64,
+    /// Base64 encoded 32-byte nonce
+    nonce: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -2045,6 +2106,7 @@ async fn generate_invite(
         signature: body.signature.clone(),
         public_key: body.public_key.clone(),
         timestamp_ms: body.timestamp_ms,
+        nonce: body.nonce.clone(),
     };
     if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, &signed, "generate_invite").await {
         warn!("Signature verification failed for generate_invite: {}", e);
@@ -2071,6 +2133,7 @@ async fn send_invite_email(
         signature: body.signature.clone(),
         public_key: body.public_key.clone(),
         timestamp_ms: body.timestamp_ms,
+        nonce: body.nonce.clone(),
     };
     if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, &signed, "send_invite").await {
         warn!("Signature verification failed for send_invite_email: {}", e);
@@ -2176,6 +2239,7 @@ async fn my_invites(
         signature: body.signature.clone(),
         public_key: body.public_key.clone(),
         timestamp_ms: body.timestamp_ms,
+        nonce: body.nonce.clone(),
     };
     if let Err(e) = verify_signature_with_ownership(&state.fastnear_api_url, &signed, "my_invites").await {
         warn!("Signature verification failed for my_invites: {}", e);
