@@ -69,9 +69,7 @@ export default function DocsPage() {
               <strong>New to NEAR?</strong> NEAR blockchain uses human-readable account names like{' '}
               <code className="bg-gray-100 px-1 rounded">alice.near</code> or{' '}
               <code className="bg-gray-100 px-1 rounded">company.near</code> instead of long hex addresses.
-              You control your account with a wallet (like{' '}
-              <a href="https://mynearwallet.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">MyNearWallet</a>
-              ) secured by a seed phrase.
+              You control your account with a wallet secured by a seed phrase.
             </div>
             <p className="text-gray-700 mb-4">
               You can send and receive emails to/from any regular email address (Gmail, Outlook, etc.) while enjoying
@@ -189,7 +187,7 @@ export default function DocsPage() {
                   </a>
                   {' '}&mdash; a decentralized Multi-Party Computation (MPC) network run by{' '}
                   <a href="https://pages.near.org/blog/chain-signatures-launch-to-enable-transactions-on-any-blockchain-from-a-near-account/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
-                    8+ independent validators
+                    independent validators
                   </a>
                   {' '}including Pagoda, Luganodes, and InfStones.
                 </p>
@@ -317,21 +315,23 @@ export default function DocsPage() {
               <div className="flex gap-4">
                 <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold flex-shrink-0">1</div>
                 <div>
-                  <h3 className="font-semibold text-gray-900">Receiving Email</h3>
+                  <h3 className="font-semibold text-gray-900">Receiving External Email</h3>
                   <p className="text-gray-600 text-sm">
-                    When someone sends email to alice@near.email, our SMTP server receives it, encrypts the content
-                    with alice.near&apos;s public key, and stores only the encrypted blob in the database.
+                    When someone sends email to alice@near.email from Gmail/Outlook, our SMTP server receives it inside the TEE,
+                    <strong> immediately encrypts it</strong> with alice.near&apos;s public key, stores only the encrypted blob,
+                    and <strong>deletes the original</strong>. The plaintext email never touches persistent storage.
                   </p>
                 </div>
               </div>
 
               <div className="flex gap-4">
-                <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold flex-shrink-0">2</div>
+                <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center text-green-600 font-bold flex-shrink-0">2</div>
                 <div>
-                  <h3 className="font-semibold text-gray-900">Reading Email</h3>
+                  <h3 className="font-semibold text-gray-900">Internal Email (NEAR → NEAR)</h3>
                   <p className="text-gray-600 text-sm">
-                    When you connect your wallet and request emails, you sign a message proving you own your account.
-                    The TEE then decrypts emails using your derived key and re-encrypts them for secure transmission to your browser.
+                    When alice@near.email sends to bob@near.email, <strong>no external SMTP is involved</strong>.
+                    The email is encrypted for bob.near&apos;s key directly inside the TEE and stored. This is faster,
+                    more private, and leaves no trace on external mail servers.
                   </p>
                 </div>
               </div>
@@ -339,13 +339,32 @@ export default function DocsPage() {
               <div className="flex gap-4">
                 <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold flex-shrink-0">3</div>
                 <div>
-                  <h3 className="font-semibold text-gray-900">Sending Email</h3>
+                  <h3 className="font-semibold text-gray-900">Reading Email</h3>
                   <p className="text-gray-600 text-sm">
-                    You compose an email in your browser, encrypt it client-side, and sign a transaction.
-                    The TEE decrypts it, sends via SMTP, and stores an encrypted copy in your Sent folder.
+                    When you connect your wallet and request emails, you sign a message proving you own your account.
+                    The TEE decrypts emails using your derived key and re-encrypts them for secure transmission to your browser.
+                    <strong> Without your NEAR account, no one can access your emails</strong> &mdash; not even us.
                   </p>
                 </div>
               </div>
+
+              <div className="flex gap-4">
+                <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold flex-shrink-0">4</div>
+                <div>
+                  <h3 className="font-semibold text-gray-900">Sending External Email</h3>
+                  <p className="text-gray-600 text-sm">
+                    When sending to Gmail/Outlook, you compose in browser, encrypt client-side, and sign a transaction.
+                    The TEE decrypts it, sends via SMTP to the external server, and stores an encrypted copy in your Sent folder.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6 p-4 bg-green-50 border border-green-200 rounded-xl">
+              <p className="text-green-800 text-sm">
+                <strong>Key point:</strong> The server only stores encrypted data. If the database is stolen, attackers get useless encrypted blobs.
+                Only your NEAR wallet can decrypt your emails.
+              </p>
             </div>
           </section>
 
@@ -608,7 +627,7 @@ export default function DocsPage() {
                 </li>
                 <li className="flex items-start gap-3">
                   <span className="text-green-500 mt-1">&#10003;</span>
-                  <span><strong>NEAR MPC Network</strong> &mdash; 8+ independent validators for key derivation</span>
+                  <span><strong>NEAR MPC Network</strong> &mdash; independent validators for key derivation</span>
                 </li>
                 <li className="flex items-start gap-3">
                   <span className="text-green-500 mt-1">&#10003;</span>

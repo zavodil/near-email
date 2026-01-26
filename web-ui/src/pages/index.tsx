@@ -280,15 +280,8 @@ export default function Home({ accounts, loading }: HomeProps) {
         <div className="bg-white rounded-2xl shadow-xl border border-gray-100 p-6 max-w-sm w-full text-center">
           <div className="w-14 h-14 bg-gradient-to-br from-blue-400 to-blue-600 rounded-full flex items-center justify-center text-white text-xl font-bold mx-auto mb-4">
             {effectiveAccountId?.charAt(0).toUpperCase()}
-          </div>
-          {paymentKeyEnabled ? (
-            <div className="flex items-center justify-center gap-1.5 mb-1">
-              <span className="text-xs font-medium text-green-700 bg-green-100 px-2 py-0.5 rounded-full">HTTPS Mode</span>
-              <span className="text-xs text-gray-400">higher limits</span>
-            </div>
-          ) : (
-            <p className="text-sm text-gray-500 mb-1">Connected as</p>
-          )}
+          </div>          
+          <p className="text-sm text-gray-500 mb-1">Connected as</p>          
           <p className="font-semibold text-gray-900 mb-1">{effectiveAccountId}</p>
           <p className="text-sm text-gray-400 mb-6">{emailAddress}</p>
 
