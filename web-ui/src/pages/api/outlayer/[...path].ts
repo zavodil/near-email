@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 
-const OUTLAYER_API_URL = process.env.NEXT_PUBLIC_OUTLAYER_API_URL || 'https://outlayer.xyz';
+const OUTLAYER_API_URL = process.env.NEXT_PUBLIC_OUTLAYER_API_URL || 'https://outlayer.fastnear.com';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   // Get the path from the catch-all route

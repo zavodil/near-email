@@ -5,7 +5,7 @@ WORKDIR /app
 # Build args for Next.js (NEXT_PUBLIC_* must be set at build time)
 ARG NEXT_PUBLIC_NETWORK_ID=mainnet
 ARG NEXT_PUBLIC_OUTLAYER_CONTRACT=outlayer.near
-ARG NEXT_PUBLIC_OUTLAYER_API_URL=https://outlayer.xyz
+ARG NEXT_PUBLIC_OUTLAYER_API_URL=https://outlayer.fastnear.com
 ARG NEXT_PUBLIC_PROJECT_ID=near-email
 ARG NEXT_PUBLIC_SECRETS_PROFILE=default
 ARG NEXT_PUBLIC_SECRETS_ACCOUNT_ID=
