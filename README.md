@@ -145,7 +145,7 @@ The web UI supports two modes of operation:
 
 ### How to Use Payment Key Mode
 
-1. **Get a Payment Key** from [OutLayer Dashboard](https://outlayer.xyz/dashboard):
+1. **Get a Payment Key** from [OutLayer Dashboard](https://outlayer.fastnear.com/dashboard):
    - Create a new Payment Key
    - Top up balance with USDC/USDT
    - Copy the key (format: `owner:nonce:secret`)
