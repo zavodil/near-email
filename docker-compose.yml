@@ -9,7 +9,7 @@ services:
       POSTGRES_USER: near_email
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_testnet:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
@@ -47,7 +47,7 @@ services:
       dockerfile: Dockerfile
     network_mode: host
     environment:
-      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD}@postgres:5432/near_email
+      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD}@localhost:5432/near_email
       API_PORT: 8080
       EMAIL_DOMAIN: near.email
       DEFAULT_ACCOUNT_SUFFIX: .near
@@ -59,7 +59,7 @@ services:
       SMTP_RELAY_PORT: ${SMTP_RELAY_PORT:-587}
       SMTP_RELAY_USER: ${SMTP_RELAY_USER:-resend}
       SMTP_RELAY_PASSWORD: ${SMTP_RELAY_PASSWORD:-}
-      SMTP_RELAY_ENABLED: ${SMTP_RELAY_ENABLED:-true}
+      SMTP_RELAY_ENABLED: ${SMTP_RELAY_ENABLED:-false}
       # API secret for authenticating requests
       API_SECRET: ${API_SECRET}
       FASTNEAR_API_URL: ${FASTNEAR_API_URL:-https://api.fastnear.com}
@@ -85,4 +85,4 @@ services:
       - "3000:3000"
 
 volumes:
-  postgres_data:
+  postgres_data_testnet:
