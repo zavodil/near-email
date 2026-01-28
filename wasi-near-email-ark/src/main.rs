@@ -595,7 +595,13 @@ fn fetch_request_email(
     for (idx, enc_email) in combined.inbox.into_iter().enumerate() {
         match crypto::decrypt_email(user_privkey, &enc_email.encrypted_data) {
             Ok(decrypted) => {
-                let parsed = parse_email(&decrypted)?;
+                let parsed = match parse_email(&decrypted) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("Failed to parse inbox email {}: {}", enc_email.id, e);
+                        continue;
+                    }
+                };
 
                 // Attachments are already processed by SMTP, just use them directly
                 let attachments = parsed.attachments;
@@ -676,7 +682,13 @@ fn fetch_request_email(
     for (idx, enc_email) in combined.sent.into_iter().enumerate() {
         match crypto::decrypt_email(user_privkey, &enc_email.encrypted_data) {
             Ok(decrypted) => {
-                let parsed = parse_email(&decrypted)?;
+                let parsed = match parse_email(&decrypted) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("Failed to parse sent email {}: {}", enc_email.id, e);
+                        continue;
+                    }
+                };
 
                 // Attachments are already processed, just use them directly
                 let attachments = parsed.attachments;
@@ -780,27 +792,68 @@ struct AttachmentJson {
     size: usize,
 }
 
-/// Parse decrypted email content (outlayer-email format)
+/// Parse decrypted email content (outlayer-email JSON or MIME format)
 fn parse_email(data: &[u8]) -> Result<ParsedEmail, Box<dyn std::error::Error>> {
-    let json: EmailJson = serde_json::from_slice(data)
-        .map_err(|e| format!("Invalid JSON: {}", e))?;
+    // First try JSON format (outlayer-email)
+    if let Ok(json) = serde_json::from_slice::<EmailJson>(data) {
+        if json.format == "outlayer-email" {
+            let attachments = json.attachments.into_iter().map(|att| types::Attachment {
+                filename: att.filename,
+                content_type: att.content_type,
+                data: None,
+                size: att.size,
+                attachment_id: Some(att.id),
+            }).collect();
 
-    if json.format != "outlayer-email" {
-        return Err(format!("Unknown format: {} (expected outlayer-email)", json.format).into());
+            return Ok(ParsedEmail {
+                subject: json.subject,
+                body: json.body,
+                attachments,
+            });
+        }
     }
 
-    let attachments = json.attachments.into_iter().map(|att| types::Attachment {
-        filename: att.filename,
-        content_type: att.content_type,
-        data: None,
-        size: att.size,
-        attachment_id: Some(att.id),
-    }).collect();
+    // Fallback: try MIME format (for internal NEAR-to-NEAR emails)
+    let text = String::from_utf8(data.to_vec())
+        .map_err(|e| format!("Invalid UTF-8: {}", e))?;
 
+    parse_mime_email(&text)
+}
+
+/// Parse MIME format email (RFC822 style headers + body)
+fn parse_mime_email(text: &str) -> Result<ParsedEmail, Box<dyn std::error::Error>> {
+    // Split headers and body by blank line (\r\n\r\n or \n\n)
+    let (headers_str, body) = if let Some(pos) = text.find("\r\n\r\n") {
+        (&text[..pos], &text[pos + 4..])
+    } else if let Some(pos) = text.find("\n\n") {
+        (&text[..pos], &text[pos + 2..])
+    } else {
+        return Err("Invalid MIME: no header/body separator found".into());
+    };
+
+    // Parse Subject header (handles multi-line folding)
+    let mut subject = String::new();
+    let mut in_subject = false;
+
+    for line in headers_str.lines() {
+        if line.to_lowercase().starts_with("subject:") {
+            subject = line[8..].trim().to_string();
+            in_subject = true;
+        } else if in_subject && (line.starts_with(' ') || line.starts_with('\t')) {
+            // Continuation of subject (folded header)
+            subject.push(' ');
+            subject.push_str(line.trim());
+        } else {
+            in_subject = false;
+        }
+    }
+
+    // For MIME emails, we don't have lazy attachments - return empty
+    // (attachments would need multipart parsing which is complex)
     Ok(ParsedEmail {
-        subject: json.subject,
-        body: json.body,
-        attachments,
+        subject,
+        body: body.to_string(),
+        attachments: Vec::new(),
     })
 }
 
