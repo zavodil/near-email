@@ -29,7 +29,8 @@ services:
       SMTP_HOST: 0.0.0.0
       SMTP_PORT: 25
       EMAIL_DOMAIN: near.email
-      DB_API_URL: http://db-api:8080
+      DEFAULT_ACCOUNT_SUFFIX: .near
+      DB_API_URL: http://172.17.0.1:8080
       API_SECRET: ${API_SECRET}
     ports:
       - "25:25"
@@ -44,17 +45,25 @@ services:
     build:
       context: ./db-api
       dockerfile: Dockerfile
+    network_mode: host
     environment:
       DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD}@postgres:5432/near_email
       API_PORT: 8080
       EMAIL_DOMAIN: near.email
+      DEFAULT_ACCOUNT_SUFFIX: .near
       # DKIM signing for outgoing emails
       DKIM_PRIVATE_KEY: ${DKIM_PRIVATE_KEY}
       DKIM_SELECTOR: ${DKIM_SELECTOR:-mail}
+      EMAIL_SIGNATURE: ${EMAIL_SIGNATURE:-Sent by %account% via NEAR OutLayer}
+      SMTP_RELAY_HOST: ${SMTP_RELAY_HOST:-}
+      SMTP_RELAY_PORT: ${SMTP_RELAY_PORT:-587}
+      SMTP_RELAY_USER: ${SMTP_RELAY_USER:-resend}
+      SMTP_RELAY_PASSWORD: ${SMTP_RELAY_PASSWORD:-}
+      SMTP_RELAY_ENABLED: ${SMTP_RELAY_ENABLED:-true}
       # API secret for authenticating requests
       API_SECRET: ${API_SECRET}
-    ports:
-      - "8080:8080"
+      FASTNEAR_API_URL: ${FASTNEAR_API_URL:-https://api.fastnear.com}
+      NEAR_RPC_URL: ${NEAR_RPC_URL:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,9 +76,11 @@ services:
       args:
         NEXT_PUBLIC_NETWORK_ID: mainnet
         NEXT_PUBLIC_OUTLAYER_CONTRACT: outlayer.near
-        NEXT_PUBLIC_PROJECT_ID: ${PROJECT_ID:-near-email}
-        NEXT_PUBLIC_SECRETS_PROFILE: ${SECRETS_PROFILE:-default}
-        NEXT_PUBLIC_SECRETS_ACCOUNT_ID: ${SECRETS_ACCOUNT_ID}
+        NEXT_PUBLIC_OUTLAYER_API_URL: ${NEXT_PUBLIC_OUTLAYER_API_URL:-https://api.outlayer.fastnear.com}
+        NEXT_PUBLIC_PROJECT_ID: ${NEXT_PUBLIC_PROJECT_ID:-zavodil.near/near-email}
+        NEXT_PUBLIC_SECRETS_PROFILE: ${NEXT_PUBLIC_SECRETS_PROFILE:-default}
+        NEXT_PUBLIC_SECRETS_ACCOUNT_ID: ${NEXT_PUBLIC_SECRETS_ACCOUNT_ID:-zavodil.near}
+        NEXT_PUBLIC_USE_SECRETS: ${NEXT_PUBLIC_USE_SECRETS:-true}
     ports:
       - "3000:3000"
 
