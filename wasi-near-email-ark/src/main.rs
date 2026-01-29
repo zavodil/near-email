@@ -199,6 +199,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             max_output_size,
             inbox_offset,
             sent_offset,
+            need_poll_token,
         } => {
             use base64::{engine::general_purpose::STANDARD, Engine};
 
@@ -219,6 +220,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 inbox_offset.unwrap_or(0),
                 sent_offset.unwrap_or(0),
                 api_secret.as_deref(),
+                need_poll_token.unwrap_or(false),
             )?;
 
             // Serialize and encrypt
@@ -244,6 +246,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             encrypted_data,
             ephemeral_pubkey,
             max_output_size: _, // Not used - we return empty EmailData, frontend refreshes separately
+            need_poll_token,
         } => {
             use base64::{engine::general_purpose::STANDARD, Engine};
 
@@ -423,6 +426,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 0,
                 0,
                 api_secret.as_deref(),
+                need_poll_token.unwrap_or(false),
             )?;
 
             // Check if just-sent email is already in the fetched results
@@ -459,6 +463,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             email_id,
             ephemeral_pubkey,
             max_output_size,
+            need_poll_token,
         } => {
             use base64::{engine::general_purpose::STANDARD, Engine};
 
@@ -482,6 +487,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 0,
                 0,
                 api_secret.as_deref(),
+                need_poll_token.unwrap_or(false),
             )?;
 
             let data_json = serde_json::to_vec(&result.email_data)?;
@@ -499,7 +505,7 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
             let account_id = get_signer()?;
 
             // Use request_email with limit=0 to get only counts (no emails fetched)
-            let result = db::request_email(db_api_url, &account_id, 0, 0, 0, 0, api_secret.as_deref())?;
+            let result = db::request_email(db_api_url, &account_id, 0, 0, 0, 0, api_secret.as_deref(), false)?;
 
             Ok(Response::GetEmailCount(GetEmailCountResponse {
                 success: true,
@@ -579,15 +585,17 @@ fn fetch_request_email(
     inbox_offset: i64,
     sent_offset: i64,
     api_secret: Option<&str>,
+    need_poll_token: bool,
 ) -> Result<FetchResult, Box<dyn std::error::Error>> {
     // Reserve some space for JSON overhead and encryption
     let effective_max = max_size.saturating_sub(10_000);
     let mut current_size: usize = 0;
 
     // Fetch both inbox and sent emails in a single HTTP request (includes counts)
-    let combined = db::request_email(api_url, account_id, 100, inbox_offset, 100, sent_offset, api_secret)?;
+    let combined = db::request_email(api_url, account_id, 100, inbox_offset, 100, sent_offset, api_secret, need_poll_token)?;
     let inbox_count = combined.inbox_count;
     let sent_count = combined.sent_count;
+    let poll_token = combined.poll_token;
 
     let mut inbox_emails = Vec::new();
     let mut inbox_next: Option<i64> = None;
@@ -766,6 +774,7 @@ fn fetch_request_email(
         email_data: EmailData {
             inbox: inbox_emails,
             sent: sent_emails,
+            poll_token,
         },
         inbox_next,
         sent_next,

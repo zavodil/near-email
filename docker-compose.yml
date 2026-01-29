@@ -64,6 +64,9 @@ services:
       API_SECRET: ${API_SECRET}
       FASTNEAR_API_URL: ${FASTNEAR_API_URL:-https://api.fastnear.com}
       NEAR_RPC_URL: ${NEAR_RPC_URL:-}
+      # Poll secret for generating poll tokens (for /poll/count endpoint)
+      # If not set, random secret generated on startup (tokens invalidated on restart)
+      POLL_SECRET: ${POLL_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy

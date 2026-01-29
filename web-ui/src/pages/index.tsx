@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import type { AccountState } from '@near-wallet-selector/core';
 import {
   showModal,
@@ -15,6 +15,9 @@ import {
   checkUserRegistration,
   initSendPubkey,
   getSendPubkey,
+  pollEmailCount,
+  getStoredPollData,
+  updateStoredInboxCount,
   type Email,
   type SentEmail,
   type GetEmailsResult,
@@ -73,6 +76,15 @@ export default function Home({ accounts, loading }: HomeProps) {
   const [showInvitesModal, setShowInvitesModal] = useState(false);
   const [inviteCodeFromUrl, setInviteCodeFromUrl] = useState<string | null>(null);
   const [checkingRegistration, setCheckingRegistration] = useState(false);
+
+  // Polling and notification state
+  const [newEmailCount, setNewEmailCount] = useState(0);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | null>(null);
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const lastPollTimeRef = useRef<number>(0);
+  const isPollingRef = useRef<boolean>(false); // Prevent concurrent polls
+  // Use ref for lastKnownInboxCount to avoid useCallback recreation on every poll
+  const lastKnownInboxCountRef = useRef<number | null>(null);
 
   function showToast(message: string, type: ToastType = 'success') {
     setToast({ message, type });
@@ -146,6 +158,137 @@ export default function Home({ accounts, loading }: HomeProps) {
     checkRegistration();
   }, [effectiveAccountId]);
 
+  // Initialize notification permission
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      setNotificationPermission(Notification.permission);
+    }
+  }, []);
+
+  // Initialize poll data from localStorage on mount
+  useEffect(() => {
+    if (!effectiveAccountId) return;
+
+    const pollData = getStoredPollData(effectiveAccountId);
+    if (pollData) {
+      lastKnownInboxCountRef.current = pollData.lastKnownInboxCount;
+    }
+  }, [effectiveAccountId]);
+
+  // Poll for new emails (uses ref to avoid recreating callback on every count change)
+  const pollForNewEmails = useCallback(async () => {
+    if (!effectiveAccountId) return;
+    if (isPollingRef.current) return; // Prevent concurrent polls
+
+    isPollingRef.current = true;
+    try {
+      const result = await pollEmailCount(effectiveAccountId);
+      if (!result) return; // No token yet
+
+      lastPollTimeRef.current = Date.now();
+      const lastKnown = lastKnownInboxCountRef.current;
+
+      // Check if inbox count increased
+      if (lastKnown !== null && result.inbox > lastKnown) {
+        const newCount = result.inbox - lastKnown;
+        setNewEmailCount(prev => {
+          const totalNew = prev + newCount;
+          // Update page title to show accumulated new email count
+          document.title = `(${totalNew}) near.email`;
+          return totalNew;
+        });
+
+        // Show browser notification
+        if (notificationPermission === 'granted') {
+          const notification = new Notification('near.email', {
+            body: newCount === 1 ? 'You have a new email!' : `You have ${newCount} new emails!`,
+            icon: '/favicon.ico',
+            tag: 'new-email',
+          });
+
+          notification.onclick = () => {
+            window.focus();
+            notification.close();
+          };
+        }
+
+        // Show toast
+        showToast(
+          newCount === 1 ? 'New email received!' : `${newCount} new emails received!`,
+          'info'
+        );
+      }
+
+      lastKnownInboxCountRef.current = result.inbox;
+      // Also persist to localStorage
+      updateStoredInboxCount(effectiveAccountId, result.inbox);
+    } finally {
+      isPollingRef.current = false;
+    }
+  }, [effectiveAccountId, notificationPermission]);
+
+  // Start polling immediately if poll_token exists (even before Check Email click)
+  useEffect(() => {
+    if (!effectiveAccountId) {
+      return;
+    }
+
+    // Check if we have a stored poll token
+    const pollData = getStoredPollData(effectiveAccountId);
+    if (!pollData && !hasCheckedMail) {
+      // No stored token and user hasn't checked mail yet - don't poll
+      return;
+    }
+
+    // Request notification permission
+    if (notificationPermission === 'default' && 'Notification' in window) {
+      Notification.requestPermission().then(permission => {
+        setNotificationPermission(permission);
+      });
+    }
+
+    // Poll every 30 seconds
+    pollIntervalRef.current = setInterval(pollForNewEmails, 30000);
+
+    // Also do an immediate poll if we have stored data (page reload scenario)
+    if (pollData && !hasCheckedMail) {
+      pollForNewEmails();
+    }
+
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
+    };
+  }, [hasCheckedMail, effectiveAccountId, pollForNewEmails, notificationPermission]);
+
+  // Handle visibility change (computer wake from sleep)
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && effectiveAccountId) {
+        const timeSinceLastPoll = Date.now() - lastPollTimeRef.current;
+        // If more than 5 seconds since last poll, check immediately
+        // Works if user has checked mail OR has stored poll token
+        const hasPollCapability = hasCheckedMail || getStoredPollData(effectiveAccountId);
+        if (timeSinceLastPoll > 5000 && hasPollCapability) {
+          pollForNewEmails();
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [effectiveAccountId, hasCheckedMail, pollForNewEmails]);
+
+  // Reset page title on unmount
+  useEffect(() => {
+    return () => {
+      document.title = 'near.email';
+    };
+  }, []);
+
   // Handle both .near and .testnet suffixes
   const emailAddress = effectiveAccountId
     ? `${effectiveAccountId.replace('.near', '').replace('.testnet', '')}@near.email`
@@ -171,6 +314,16 @@ export default function Home({ accounts, loading }: HomeProps) {
       const result = await getEmails(0, 0);
       updateFromResult(result);
       setHasCheckedMail(true);
+
+      // Sync inbox count for polling from server response
+      // getEmails stores the actual inbox_count in localStorage via storePollToken
+      // We just need to update our ref to match
+      const pollData = effectiveAccountId ? getStoredPollData(effectiveAccountId) : null;
+      if (pollData) {
+        lastKnownInboxCountRef.current = pollData.lastKnownInboxCount;
+      }
+      setNewEmailCount(0); // Clear badge
+      document.title = 'near.email'; // Reset title
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -218,6 +371,12 @@ export default function Home({ accounts, loading }: HomeProps) {
     setCurrentFolder(folder);
     setSelectedEmail(null);
     setSelectedSentEmail(null);
+
+    // Clear new email badge when viewing inbox
+    if (folder === 'inbox') {
+      setNewEmailCount(0);
+      document.title = 'near.email';
+    }
   }
 
   function handleConnect() {
@@ -775,13 +934,18 @@ export default function Home({ accounts, loading }: HomeProps) {
           <div className="flex border-b">
             <button
               onClick={() => handleFolderChange('inbox')}
-              className={`flex-1 py-2.5 text-center text-sm font-medium transition-colors ${
+              className={`flex-1 py-2.5 text-center text-sm font-medium transition-colors relative ${
                 currentFolder === 'inbox'
                   ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50/50'
                   : 'text-gray-500 hover:bg-gray-50'
               }`}
             >
               Inbox ({emails.length}{inboxNextOffset ? '+' : ''} {pluralize(emails.length, 'email', 'emails')})
+              {newEmailCount > 0 && currentFolder !== 'inbox' && (
+                <span className="absolute top-1 right-2 bg-red-500 text-white text-xs rounded-full px-1.5 py-0.5 min-w-[18px] animate-pulse">
+                  {newEmailCount > 99 ? '99+' : newEmailCount}
+                </span>
+              )}
             </button>
             <button
               onClick={() => handleFolderChange('sent')}
@@ -907,6 +1071,13 @@ export default function Home({ accounts, loading }: HomeProps) {
         accountId={effectiveAccountId || ''}
         isOpen={showInvitesModal}
         onClose={() => setShowInvitesModal(false)}
+        walletConnected={isConnected}
+        onConnectWallet={() => {
+          setShowInvitesModal(false);
+          showModal();
+        }}
+        walletAccountId={accountId}
+        paymentKeyOwner={paymentKeyEnabled ? paymentKeyOwner : null}
       />
 
       {/* Toast notification */}

@@ -93,6 +93,9 @@ struct AppState {
     /// Rate limiter for invite code attempts (IP -> (count, window_start))
     /// Limits: 10 attempts per minute per IP
     invite_rate_limiter: Mutex<HashMap<String, RateLimitEntry>>,
+    /// Secret for generating poll tokens (SHA256(account_id + poll_secret))
+    /// Used by /poll/count endpoint for lightweight email count checking
+    poll_secret: String,
 }
 
 #[tokio::main]
@@ -219,7 +222,17 @@ async fn main() -> anyhow::Result<()> {
 
     let invite_rate_limiter = Mutex::new(HashMap::new());
 
-    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay, api_secret, fastnear_api_url, near_rpc_url, invite_rate_limiter };
+    // Poll secret for generating poll tokens (for lightweight /poll/count endpoint)
+    // WARNING: If not set, a random secret is generated. This means all existing
+    // poll tokens become invalid after server restart. For production, set POLL_SECRET!
+    let poll_secret = env::var("POLL_SECRET").unwrap_or_else(|_| {
+        let random_bytes: [u8; 32] = rand::thread_rng().gen();
+        let secret = hex::encode(random_bytes);
+        warn!("POLL_SECRET not set - generated random secret. Poll tokens will be invalidated on restart!");
+        secret
+    });
+
+    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay, api_secret, fastnear_api_url, near_rpc_url, invite_rate_limiter, poll_secret };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -254,6 +267,8 @@ async fn main() -> anyhow::Result<()> {
     // Public routes (no auth needed)
     let public_routes = Router::new()
         .route("/health", get(health))
+        // Poll endpoint for lightweight email count checking (uses poll token for auth)
+        .route("/poll/count", get(poll_count))
         // Invite routes (public - called by frontend, have their own protection logic)
         .route("/invites/check-user", get(check_user))
         .route("/invites/use", post(use_invite))
@@ -323,6 +338,92 @@ struct GetEmailsQuery {
 fn default_limit() -> i64 {
     50
 }
+
+// ==================== Poll Token Types ====================
+
+#[derive(Debug, Deserialize)]
+struct PollCountQuery {
+    token: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PollCountResponse {
+    inbox: i64,
+    sent: i64,
+}
+
+/// Generate a new poll token for an account, invalidating any existing one
+async fn generate_poll_token(
+    db: &PgPool,
+    poll_secret: &str,
+    account_id: &str,
+) -> Result<String, sqlx::Error> {
+    // Delete existing token for this account (if any)
+    sqlx::query("DELETE FROM poll_tokens WHERE account_id = $1")
+        .bind(account_id)
+        .execute(db)
+        .await?;
+
+    // Generate new token: SHA256(account_id + poll_secret + random_salt)
+    let salt: [u8; 16] = rand::thread_rng().gen();
+    let mut hasher = Sha256::new();
+    hasher.update(account_id.as_bytes());
+    hasher.update(poll_secret.as_bytes());
+    hasher.update(&salt);
+    let token = hex::encode(hasher.finalize());
+
+    // Store the token
+    sqlx::query(
+        "INSERT INTO poll_tokens (token, account_id, created_at) VALUES ($1, $2, NOW())"
+    )
+    .bind(&token)
+    .bind(account_id)
+    .execute(db)
+    .await?;
+
+    Ok(token)
+}
+
+/// Public endpoint: get email counts using poll token
+/// No API_SECRET required - token authenticates the request
+async fn poll_count(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PollCountQuery>,
+) -> Result<Json<PollCountResponse>, StatusCode> {
+    // Validate token and get account_id
+    let result: Option<(String,)> = sqlx::query_as(
+        "SELECT account_id FROM poll_tokens WHERE token = $1"
+    )
+    .bind(&query.token)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to validate poll token: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let account_id = match result {
+        Some((id,)) => id,
+        None => return Err(StatusCode::UNAUTHORIZED),
+    };
+
+    // Get counts (fast parallel queries)
+    let (inbox_result, sent_result) = tokio::join!(
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM emails WHERE recipient = $1")
+            .bind(&account_id)
+            .fetch_one(&state.db),
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM sent_emails WHERE sender = $1")
+            .bind(&account_id)
+            .fetch_one(&state.db)
+    );
+
+    let inbox = inbox_result.map(|r| r.0).unwrap_or(0);
+    let sent = sent_result.map(|r| r.0).unwrap_or(0);
+
+    Ok(Json(PollCountResponse { inbox, sent }))
+}
+
+// ==================== Email Types ====================
 
 #[derive(Debug, FromRow)]
 struct EmailRow {
@@ -425,6 +526,9 @@ struct RequestEmailQuery {
     sent_limit: i64,
     #[serde(default)]
     sent_offset: i64,
+    /// If true, generate and return a new poll token (invalidates old one)
+    #[serde(default)]
+    need_poll_token: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -433,6 +537,9 @@ struct RequestEmailResponse {
     sent: Vec<SentEmailRecord>,
     inbox_count: i64,
     sent_count: i64,
+    /// Poll token for lightweight /poll/count endpoint (only if requested via need_poll_token)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    poll_token: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -1118,6 +1225,7 @@ async fn request_email(
                 sent: vec![],
                 inbox_count: 0,
                 sent_count: 0,
+                poll_token: None,
             }));
         }
         AccessCheck::Blacklisted(_) => {
@@ -1126,6 +1234,7 @@ async fn request_email(
                 sent: vec![],
                 inbox_count: 0,
                 sent_count: 0,
+                poll_token: None,
             }));
         }
     }
@@ -1203,7 +1312,20 @@ async fn request_email(
         })
         .collect();
 
-    Ok(Json(RequestEmailResponse { inbox, sent, inbox_count, sent_count }))
+    // Generate poll token if requested
+    let poll_token = if query.need_poll_token {
+        match generate_poll_token(&state.db, &state.poll_secret, &query.account_id).await {
+            Ok(token) => Some(token),
+            Err(e) => {
+                error!("Failed to generate poll token: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(Json(RequestEmailResponse { inbox, sent, inbox_count, sent_count, poll_token }))
 }
 
 /// Store a sent email (already encrypted by WASI module)

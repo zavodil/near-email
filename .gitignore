@@ -1,2 +1,3 @@
 web-ui/.next
 .env.local
+.*.md

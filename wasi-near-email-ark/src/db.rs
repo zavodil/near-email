@@ -198,10 +198,11 @@ pub fn request_email(
     sent_limit: i64,
     sent_offset: i64,
     api_secret: Option<&str>,
+    need_poll_token: bool,
 ) -> Result<crate::types::DbRequestEmailResponse, Box<dyn std::error::Error>> {
     let url = format!(
-        "{}/request-email?account_id={}&inbox_limit={}&inbox_offset={}&sent_limit={}&sent_offset={}",
-        api_url, account_id, inbox_limit, inbox_offset, sent_limit, sent_offset
+        "{}/request-email?account_id={}&inbox_limit={}&inbox_offset={}&sent_limit={}&sent_offset={}&need_poll_token={}",
+        api_url, account_id, inbox_limit, inbox_offset, sent_limit, sent_offset, need_poll_token
     );
 
     let mut request = Client::new()

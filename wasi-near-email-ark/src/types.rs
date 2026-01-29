@@ -36,6 +36,9 @@ pub enum Request {
         /// Offset for sent emails
         #[serde(default)]
         sent_offset: Option<i64>,
+        /// If true, generate and return a new poll token (for lightweight /poll/count endpoint)
+        #[serde(default)]
+        need_poll_token: Option<bool>,
     },
 
     /// Send email from the signer's account
@@ -50,6 +53,9 @@ pub enum Request {
         /// Max output size in bytes (default: 1.5MB)
         #[serde(default)]
         max_output_size: Option<usize>,
+        /// If true, generate and return a new poll token (for lightweight /poll/count endpoint)
+        #[serde(default)]
+        need_poll_token: Option<bool>,
     },
 
     /// Delete an email (must belong to signer)
@@ -61,6 +67,9 @@ pub enum Request {
         /// Max output size in bytes (default: 1.5MB)
         #[serde(default)]
         max_output_size: Option<usize>,
+        /// If true, generate and return a new poll token (for lightweight /poll/count endpoint)
+        #[serde(default)]
+        need_poll_token: Option<bool>,
     },
 
     /// Get email count for the signer
@@ -176,6 +185,9 @@ pub struct ErrorResponse {
 pub struct EmailData {
     pub inbox: Vec<Email>,
     pub sent: Vec<SentEmail>,
+    /// Poll token for lightweight /poll/count endpoint (encrypted along with emails)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poll_token: Option<String>,
 }
 
 /// Decrypted payload for SendEmail request
@@ -266,6 +278,9 @@ pub struct DbRequestEmailResponse {
     pub sent: Vec<EncryptedSentEmail>,
     pub inbox_count: i64,
     pub sent_count: i64,
+    /// Poll token for lightweight /poll/count endpoint (if requested via need_poll_token)
+    #[serde(default)]
+    pub poll_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

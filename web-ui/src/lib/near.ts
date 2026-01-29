@@ -72,6 +72,9 @@ const PAYMENT_KEY_ENABLED_STORAGE = 'near-email-payment-key-enabled';
 // Send pubkey localStorage key (per-account, deterministic - can be cached)
 const SEND_PUBKEY_STORAGE = 'near-email-send-pubkey';
 
+// Poll token localStorage key (for lightweight /poll/count endpoint)
+const POLL_TOKEN_STORAGE = 'near-email-poll-token';
+
 // Max output size limits (in bytes)
 // Transaction mode limited by blockchain (~1.5MB safe)
 // HTTPS mode can handle much more (25MB reasonable for browser/memory)
@@ -137,6 +140,73 @@ function storeSendPubkey(accountId: string, pubkey: string): void {
     account_id: accountId,
     pubkey,
   }));
+}
+
+// Poll token data stored in localStorage
+interface PollTokenData {
+  account_id: string;
+  token: string;
+  last_known_inbox_count: number;
+}
+
+// Get poll token from localStorage for a specific account
+function getStoredPollToken(accountId: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const stored = localStorage.getItem(POLL_TOKEN_STORAGE);
+    if (!stored) return null;
+    const data: PollTokenData = JSON.parse(stored);
+    if (data.account_id === accountId && data.token) {
+      return data.token;
+    }
+  } catch {
+    // Invalid data, ignore
+  }
+  return null;
+}
+
+// Get stored poll data (token + last known count) for a specific account
+export function getStoredPollData(accountId: string): { token: string; lastKnownInboxCount: number } | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const stored = localStorage.getItem(POLL_TOKEN_STORAGE);
+    if (!stored) return null;
+    const data: PollTokenData = JSON.parse(stored);
+    if (data.account_id === accountId && data.token) {
+      return {
+        token: data.token,
+        lastKnownInboxCount: data.last_known_inbox_count ?? 0,
+      };
+    }
+  } catch {
+    // Invalid data, ignore
+  }
+  return null;
+}
+
+// Save poll token to localStorage (with inbox count for comparison on page reload)
+function storePollToken(accountId: string, token: string, inboxCount?: number): void {
+  if (typeof window === 'undefined') return;
+  // Preserve existing count if not provided
+  const existing = getStoredPollData(accountId);
+  localStorage.setItem(POLL_TOKEN_STORAGE, JSON.stringify({
+    account_id: accountId,
+    token,
+    last_known_inbox_count: inboxCount ?? existing?.lastKnownInboxCount ?? 0,
+  }));
+}
+
+// Update just the inbox count (without changing token)
+export function updateStoredInboxCount(accountId: string, inboxCount: number): void {
+  if (typeof window === 'undefined') return;
+  const existing = getStoredPollData(accountId);
+  if (existing) {
+    localStorage.setItem(POLL_TOKEN_STORAGE, JSON.stringify({
+      account_id: accountId,
+      token: existing.token,
+      last_known_inbox_count: inboxCount,
+    }));
+  }
 }
 
 // Initialize send pubkey from localStorage (call on page load with current account)
@@ -558,6 +628,14 @@ export async function getEmails(
 
   console.log('🔐 Generated ephemeral pubkey:', ephemeralPubkeyHex);
 
+  // Get current account to check if we need poll token
+  const currentAccount = isPaymentKeyMode()
+    ? paymentKeyConfig.owner
+    : (await getAccounts())[0]?.accountId;
+
+  // Request poll token if we don't have one stored
+  const needPollToken = currentAccount ? !getStoredPollToken(currentAccount) : false;
+
   // Call WASI with ephemeral public key
   const params: Record<string, any> = {
     ephemeral_pubkey: ephemeralPubkeyHex,
@@ -566,6 +644,7 @@ export async function getEmails(
 
   if (inboxOffset > 0) params.inbox_offset = inboxOffset;
   if (sentOffset > 0) params.sent_offset = sentOffset;
+  if (needPollToken) params.need_poll_token = true;
 
   const result = await callOutLayer('get_emails', params);
 
@@ -573,9 +652,6 @@ export async function getEmails(
   if (result.send_pubkey) {
     cachedSendPubkey = result.send_pubkey;
     // Persist to localStorage for this account
-    const currentAccount = isPaymentKeyMode()
-      ? paymentKeyConfig.owner
-      : (await getAccounts())[0]?.accountId;
     if (currentAccount) {
       storeSendPubkey(currentAccount, result.send_pubkey);
       cachedSendPubkeyAccount = currentAccount;
@@ -585,6 +661,13 @@ export async function getEmails(
 
   // Decrypt the response with ephemeral private key
   const emailData = decryptEmailData(result.encrypted_data);
+
+  // Save poll_token if received (encrypted inside emailData)
+  // Also save inbox_count for comparison on page reload
+  if (emailData.poll_token && currentAccount) {
+    storePollToken(currentAccount, emailData.poll_token, result.inbox_count ?? emailData.inbox.length);
+    console.log('🔔 Cached poll_token for', currentAccount);
+  }
 
   return {
     inbox: emailData.inbox,
@@ -622,6 +705,12 @@ export async function sendEmail(
   cachedEphemeralKey = new PrivateKey();
   const ephemeralPubkeyHex = cachedEphemeralKey.publicKey.toHex();
 
+  // Get current account to check if we need poll token
+  const currentAccount = isPaymentKeyMode()
+    ? paymentKeyConfig.owner
+    : (await getAccounts())[0]?.accountId;
+  const needPollToken = currentAccount ? !getStoredPollToken(currentAccount) : false;
+
   // Convert hex pubkey to bytes
   const pubkeyBytes = Uint8Array.from(
     cachedSendPubkey.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16))
@@ -647,11 +736,18 @@ export async function sendEmail(
     ephemeral_pubkey: ephemeralPubkeyHex,
     max_output_size: maxOutputSize ?? getDefaultMaxOutputSize(),
   };
+  if (needPollToken) params.need_poll_token = true;
 
   const result = await callOutLayer('send_email', params);
 
   // Decrypt fresh email data
   const emailData = decryptEmailData(result.encrypted_data);
+
+  // Save poll_token if received (encrypted inside emailData)
+  if (emailData.poll_token && currentAccount) {
+    storePollToken(currentAccount, emailData.poll_token, emailData.inbox.length);
+    console.log('🔔 Cached poll_token for', currentAccount);
+  }
 
   return {
     messageId: result.message_id ?? null,
@@ -675,16 +771,29 @@ export async function deleteEmail(
   cachedEphemeralKey = new PrivateKey();
   const ephemeralPubkeyHex = cachedEphemeralKey.publicKey.toHex();
 
+  // Get current account to check if we need poll token
+  const currentAccount = isPaymentKeyMode()
+    ? paymentKeyConfig.owner
+    : (await getAccounts())[0]?.accountId;
+  const needPollToken = currentAccount ? !getStoredPollToken(currentAccount) : false;
+
   const params: Record<string, any> = {
     email_id: emailId,
     ephemeral_pubkey: ephemeralPubkeyHex,
     max_output_size: maxOutputSize ?? getDefaultMaxOutputSize(),
   };
+  if (needPollToken) params.need_poll_token = true;
 
   const result = await callOutLayer('delete_email', params);
 
   // Decrypt fresh email data
   const emailData = decryptEmailData(result.encrypted_data);
+
+  // Save poll_token if received (encrypted inside emailData)
+  if (emailData.poll_token && currentAccount) {
+    storePollToken(currentAccount, emailData.poll_token, emailData.inbox.length);
+    console.log('🔔 Cached poll_token for', currentAccount);
+  }
 
   return {
     deleted: result.deleted,
@@ -704,6 +813,49 @@ export async function getEmailCount(): Promise<EmailCountResult> {
     inboxCount: result.inbox_count,
     sentCount: result.sent_count,
   };
+}
+
+// DB_API_URL for poll endpoint
+const DB_API_URL_FOR_POLL = process.env.NEXT_PUBLIC_DB_API_URL || 'http://localhost:8080';
+
+// Poll email count using lightweight token-based endpoint (no WASI call needed)
+// Returns null if no poll token available (user should call getEmails first)
+export interface PollCountResult {
+  inbox: number;
+  sent: number;
+}
+
+export async function pollEmailCount(accountId: string): Promise<PollCountResult | null> {
+  const token = getStoredPollToken(accountId);
+  if (!token) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      `${DB_API_URL_FOR_POLL}/poll/count?token=${encodeURIComponent(token)}`
+    );
+
+    if (response.status === 401) {
+      // Token invalid/revoked - clear it
+      localStorage.removeItem(POLL_TOKEN_STORAGE);
+      return null;
+    }
+
+    if (!response.ok) {
+      console.error('Poll count failed:', response.status);
+      return null;
+    }
+
+    const data = await response.json();
+    return {
+      inbox: data.inbox,
+      sent: data.sent,
+    };
+  } catch (error) {
+    console.error('Poll count error:', error);
+    return null;
+  }
 }
 
 // Get a single attachment by ID (for lazy loading)
@@ -769,6 +921,7 @@ export interface SentEmail {
 export interface EmailData {
   inbox: Email[];
   sent: SentEmail[];
+  poll_token?: string;
 }
 
 // ===== INVITE SYSTEM =====

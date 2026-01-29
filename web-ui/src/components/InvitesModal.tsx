@@ -11,11 +11,18 @@ interface InvitesModalProps {
   accountId: string;
   isOpen: boolean;
   onClose: () => void;
+  walletConnected: boolean;
+  onConnectWallet: () => void;
+  // For showing warning when wallet account differs from payment key owner
+  walletAccountId: string | null;
+  paymentKeyOwner: string | null;
 }
 
 type Tab = 'status' | 'send' | 'code';
 
-export default function InvitesModal({ accountId, isOpen, onClose }: InvitesModalProps) {
+export default function InvitesModal({ accountId, isOpen, onClose, walletConnected, onConnectWallet, walletAccountId, paymentKeyOwner }: InvitesModalProps) {
+  // Show warning if user is in payment key mode but wallet is different account
+  const showAccountMismatchWarning = walletConnected && paymentKeyOwner && walletAccountId && paymentKeyOwner !== walletAccountId;
   const [tab, setTab] = useState<Tab>('status');
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<MyInvitesResult | null>(null);
@@ -33,10 +40,10 @@ export default function InvitesModal({ accountId, isOpen, onClose }: InvitesModa
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    if (isOpen && accountId) {
+    if (isOpen && accountId && walletConnected) {
       loadInvites();
     }
-  }, [isOpen, accountId]);
+  }, [isOpen, accountId, walletConnected]);
 
   async function loadInvites() {
     setLoading(true);
@@ -145,7 +152,7 @@ export default function InvitesModal({ accountId, isOpen, onClose }: InvitesModa
         </div>
 
         {/* Stats bar */}
-        {data && (
+        {walletConnected && data && (
           <div className="bg-gradient-to-r from-purple-50 to-blue-50 px-4 py-3 border-b">
             <div className="flex items-center justify-center gap-6">
               <div className="text-center">
@@ -168,43 +175,78 @@ export default function InvitesModal({ accountId, isOpen, onClose }: InvitesModa
           </div>
         )}
 
+        {/* Account mismatch warning */}
+        {showAccountMismatchWarning && (
+          <div className="bg-amber-50 border-b border-amber-100 px-4 py-2">
+            <div className="flex items-start gap-2">
+              <svg className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              <p className="text-xs text-amber-700">
+                You're managing invites for <span className="font-medium">{walletAccountId}</span>, not your payment key account <span className="font-medium">{paymentKeyOwner}</span>.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Tabs */}
-        <div className="flex border-b">
-          <button
-            onClick={() => setTab('status')}
-            className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
-              tab === 'status'
-                ? 'text-purple-600 border-b-2 border-purple-600 bg-purple-50/50'
-                : 'text-gray-500 hover:bg-gray-50'
-            }`}
-          >
-            My Invites
-          </button>
-          <button
-            onClick={() => setTab('send')}
-            className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
-              tab === 'send'
-                ? 'text-purple-600 border-b-2 border-purple-600 bg-purple-50/50'
-                : 'text-gray-500 hover:bg-gray-50'
-            }`}
-          >
-            Send via Email
-          </button>
-          <button
-            onClick={() => setTab('code')}
-            className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
-              tab === 'code'
-                ? 'text-purple-600 border-b-2 border-purple-600 bg-purple-50/50'
-                : 'text-gray-500 hover:bg-gray-50'
-            }`}
-          >
-            Get Code
-          </button>
-        </div>
+        {walletConnected && (
+          <div className="flex border-b">
+            <button
+              onClick={() => setTab('status')}
+              className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
+                tab === 'status'
+                  ? 'text-purple-600 border-b-2 border-purple-600 bg-purple-50/50'
+                  : 'text-gray-500 hover:bg-gray-50'
+              }`}
+            >
+              My Invites
+            </button>
+            <button
+              onClick={() => setTab('send')}
+              className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
+                tab === 'send'
+                  ? 'text-purple-600 border-b-2 border-purple-600 bg-purple-50/50'
+                  : 'text-gray-500 hover:bg-gray-50'
+              }`}
+            >
+              Send via Email
+            </button>
+            <button
+              onClick={() => setTab('code')}
+              className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
+                tab === 'code'
+                  ? 'text-purple-600 border-b-2 border-purple-600 bg-purple-50/50'
+                  : 'text-gray-500 hover:bg-gray-50'
+              }`}
+            >
+              Get Code
+            </button>
+          </div>
+        )}
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-4">
-          {loading ? (
+          {!walletConnected ? (
+            <div className="text-center py-8">
+              <div className="w-16 h-16 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg className="w-8 h-8 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">Wallet Required</h3>
+              <p className="text-sm text-gray-500 mb-6">
+                To manage invites, you need to connect your NEAR wallet.<br />
+                This is required for signature verification.
+              </p>
+              <button
+                onClick={onConnectWallet}
+                className="px-6 py-2.5 bg-purple-600 text-white rounded-xl font-medium hover:bg-purple-700 transition-colors"
+              >
+                Connect Wallet
+              </button>
+            </div>
+          ) : loading ? (
             <div className="flex items-center justify-center py-12">
               <div className="w-8 h-8 border-3 border-gray-200 border-t-purple-500 rounded-full animate-spin"></div>
             </div>
