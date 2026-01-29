@@ -1,8 +1,10 @@
 import { setupWalletSelector } from '@near-wallet-selector/core';
 import { setupModal } from '@near-wallet-selector/modal-ui';
 import { setupMyNearWallet } from '@near-wallet-selector/my-near-wallet';
-import { setupHereWallet } from '@near-wallet-selector/here-wallet';
 import { setupMeteorWallet } from '@near-wallet-selector/meteor-wallet';
+import { setupIntearWallet } from '@near-wallet-selector/intear-wallet';
+import { setupHotWallet } from '@near-wallet-selector/hot-wallet';
+import { setupNearMobileWallet } from '@near-wallet-selector/near-mobile-wallet';
 import type { WalletSelector, AccountState } from '@near-wallet-selector/core';
 import { actionCreators } from '@near-js/transactions';
 import { PrivateKey, decrypt } from 'eciesjs';
@@ -280,8 +282,10 @@ export async function initWalletSelector(): Promise<WalletSelector> {
     network: NETWORK_ID as 'mainnet' | 'testnet',
     modules: [
       setupMyNearWallet(),
-      setupHereWallet(),
       setupMeteorWallet(),
+      setupIntearWallet(),
+      setupHotWallet(),
+      setupNearMobileWallet(),
     ],
   });
 
