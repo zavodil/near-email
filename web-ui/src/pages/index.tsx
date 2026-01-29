@@ -165,16 +165,6 @@ export default function Home({ accounts, loading }: HomeProps) {
     }
   }, []);
 
-  // Initialize poll data from localStorage on mount
-  useEffect(() => {
-    if (!effectiveAccountId) return;
-
-    const pollData = getStoredPollData(effectiveAccountId);
-    if (pollData) {
-      lastKnownInboxCountRef.current = pollData.lastKnownInboxCount;
-    }
-  }, [effectiveAccountId]);
-
   // Poll for new emails (uses ref to avoid recreating callback on every count change)
   const pollForNewEmails = useCallback(async () => {
     if (!effectiveAccountId) return;
@@ -241,8 +231,14 @@ export default function Home({ accounts, loading }: HomeProps) {
       return;
     }
 
-    // Check if we have a stored poll token
+    // Check if we have a stored poll token and initialize ref from localStorage
     const pollData = getStoredPollData(effectiveAccountId);
+    if (pollData) {
+      // IMPORTANT: Initialize ref BEFORE polling starts (fixes race condition)
+      lastKnownInboxCountRef.current = pollData.lastKnownInboxCount;
+      console.log(`[Poll] Restored lastKnownInboxCount from localStorage: ${pollData.lastKnownInboxCount}`);
+    }
+
     if (!pollData && !hasCheckedMail) {
       // No stored token and user hasn't checked mail yet - don't poll
       return;
