@@ -612,6 +612,9 @@ export interface GetEmailsResult {
   sendPubkey: string;
   inboxNextOffset: number | null;
   sentNextOffset: number | null;
+  // Total counts (for polling "last seen" tracking)
+  inboxCount?: number;
+  sentCount?: number;
 }
 
 // API functions
@@ -663,10 +666,14 @@ export async function getEmails(
   const emailData = decryptEmailData(result.encrypted_data);
 
   // Save poll_token if received (encrypted inside emailData)
-  // Also save inbox_count for comparison on page reload
   if (emailData.poll_token && currentAccount) {
     storePollToken(currentAccount, emailData.poll_token, result.inbox_count ?? emailData.inbox.length);
     console.log('🔔 Cached poll_token for', currentAccount);
+  } else if (currentAccount) {
+    // Always update inbox count when loading emails, even without new poll_token
+    // This ensures "last seen count" is accurate for polling comparison
+    updateStoredInboxCount(currentAccount, result.inbox_count ?? emailData.inbox.length);
+    console.log('🔔 Updated inbox_count for', currentAccount, ':', result.inbox_count ?? emailData.inbox.length);
   }
 
   return {
@@ -675,6 +682,9 @@ export async function getEmails(
     sendPubkey: result.send_pubkey,
     inboxNextOffset: result.inbox_next_offset ?? null,
     sentNextOffset: result.sent_next_offset ?? null,
+    // Include counts for component to use
+    inboxCount: result.inbox_count,
+    sentCount: result.sent_count,
   };
 }
 

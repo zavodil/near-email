@@ -17,7 +17,6 @@ import {
   getSendPubkey,
   pollEmailCount,
   getStoredPollData,
-  updateStoredInboxCount,
   type Email,
   type SentEmail,
   type GetEmailsResult,
@@ -178,48 +177,56 @@ export default function Home({ accounts, loading }: HomeProps) {
       lastPollTimeRef.current = Date.now();
       const lastKnown = lastKnownInboxCountRef.current;
 
-      // Check if inbox count increased
-      if (lastKnown !== null && result.inbox > lastKnown) {
-        const newCount = result.inbox - lastKnown;
-        console.log(`[Poll] New emails detected: ${newCount} (${lastKnown} -> ${result.inbox})`);
+      // Calculate new emails since user last LOADED emails (not since last poll)
+      // lastKnown = what user last SAW (only updated on loadEmails, not on poll)
+      const newEmailsSinceLastSeen = lastKnown !== null ? Math.max(0, result.inbox - lastKnown) : 0;
 
-        setNewEmailCount(prev => {
-          const totalNew = prev + newCount;
-          // Update page title to show accumulated new email count
-          document.title = `(${totalNew}) near.email`;
-          return totalNew;
-        });
+      // Update newEmailCount state to reflect total unread
+      // Only show notification if there are MORE new emails than we already notified about
+      setNewEmailCount(prev => {
+        if (newEmailsSinceLastSeen > prev) {
+          // There are additional new emails since last notification
+          const additionalNew = newEmailsSinceLastSeen - prev;
+          console.log(`[Poll] New emails detected: +${additionalNew} (total unread: ${newEmailsSinceLastSeen}, lastSeen: ${lastKnown})`);
 
-        // Show browser notification (check permission directly, not from state)
-        const currentPermission = typeof Notification !== 'undefined' ? Notification.permission : 'denied';
-        console.log(`[Poll] Notification permission: ${currentPermission}`);
-        if (currentPermission === 'granted') {
-          try {
-            const notification = new Notification('near.email', {
-              body: newCount === 1 ? 'You have a new email!' : `You have ${newCount} new emails!`,
-              icon: '/favicon.ico',
-              tag: 'new-email',
-            });
-            notification.onclick = () => {
-              window.focus();
-              notification.close();
-            };
-          } catch (e) {
-            console.error('[Poll] Failed to show notification:', e);
+          // Update page title
+          document.title = `(${newEmailsSinceLastSeen}) near.email`;
+
+          // Show browser notification (check permission directly, not from state)
+          const currentPermission = typeof Notification !== 'undefined' ? Notification.permission : 'denied';
+          console.log(`[Poll] Notification permission: ${currentPermission}`);
+          if (currentPermission === 'granted') {
+            try {
+              const notification = new Notification('near.email', {
+                body: additionalNew === 1 ? 'You have a new email!' : `You have ${additionalNew} new emails!`,
+                icon: '/favicon.ico',
+                tag: 'new-email',
+              });
+              notification.onclick = () => {
+                window.focus();
+                notification.close();
+              };
+            } catch (e) {
+              console.error('[Poll] Failed to show notification:', e);
+            }
           }
+
+          // Show toast
+          console.log('[Poll] Showing toast...');
+          showToast(
+            additionalNew === 1 ? 'New email received!' : `${additionalNew} new emails received!`,
+            'info'
+          );
+
+          return newEmailsSinceLastSeen;
         }
+        // No new emails OR same count as before (already notified)
+        return prev;
+      });
 
-        // Show toast (will show regardless of which page section user is on)
-        console.log('[Poll] Showing toast...');
-        showToast(
-          newCount === 1 ? 'New email received!' : `${newCount} new emails received!`,
-          'info'
-        );
-      }
-
-      lastKnownInboxCountRef.current = result.inbox;
-      // Also persist to localStorage
-      updateStoredInboxCount(effectiveAccountId, result.inbox);
+      // NOTE: Do NOT update lastKnownInboxCountRef here!
+      // It represents what user last SAW, only updated when user LOADS emails
+      // This ensures reopening the page shows notification for unseen emails
     } finally {
       isPollingRef.current = false;
     }
@@ -319,14 +326,14 @@ export default function Home({ accounts, loading }: HomeProps) {
       updateFromResult(result);
       setHasCheckedMail(true);
 
-      // Sync inbox count for polling from server response
-      // getEmails stores the actual inbox_count in localStorage via storePollToken
-      // We just need to update our ref to match
-      const pollData = effectiveAccountId ? getStoredPollData(effectiveAccountId) : null;
-      if (pollData) {
-        lastKnownInboxCountRef.current = pollData.lastKnownInboxCount;
-      }
-      setNewEmailCount(0); // Clear badge
+      // Update lastKnownInboxCount to what user just SAW
+      // near.ts now updates localStorage with actual inbox_count from server
+      // We just need to sync our ref
+      const serverCount = result.inboxCount ?? result.inbox.length;
+      lastKnownInboxCountRef.current = serverCount;
+      console.log(`[loadEmails] Updated lastKnownInboxCount to ${serverCount}`)
+
+      setNewEmailCount(0); // Clear badge - user has seen all emails now
       document.title = 'near.email'; // Reset title
     } catch (err: any) {
       setError(err.message);
