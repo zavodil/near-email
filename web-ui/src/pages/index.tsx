@@ -191,6 +191,8 @@ export default function Home({ accounts, loading }: HomeProps) {
       // Check if inbox count increased
       if (lastKnown !== null && result.inbox > lastKnown) {
         const newCount = result.inbox - lastKnown;
+        console.log(`[Poll] New emails detected: ${newCount} (${lastKnown} -> ${result.inbox})`);
+
         setNewEmailCount(prev => {
           const totalNew = prev + newCount;
           // Update page title to show accumulated new email count
@@ -198,21 +200,27 @@ export default function Home({ accounts, loading }: HomeProps) {
           return totalNew;
         });
 
-        // Show browser notification
-        if (notificationPermission === 'granted') {
-          const notification = new Notification('near.email', {
-            body: newCount === 1 ? 'You have a new email!' : `You have ${newCount} new emails!`,
-            icon: '/favicon.ico',
-            tag: 'new-email',
-          });
-
-          notification.onclick = () => {
-            window.focus();
-            notification.close();
-          };
+        // Show browser notification (check permission directly, not from state)
+        const currentPermission = typeof Notification !== 'undefined' ? Notification.permission : 'denied';
+        console.log(`[Poll] Notification permission: ${currentPermission}`);
+        if (currentPermission === 'granted') {
+          try {
+            const notification = new Notification('near.email', {
+              body: newCount === 1 ? 'You have a new email!' : `You have ${newCount} new emails!`,
+              icon: '/favicon.ico',
+              tag: 'new-email',
+            });
+            notification.onclick = () => {
+              window.focus();
+              notification.close();
+            };
+          } catch (e) {
+            console.error('[Poll] Failed to show notification:', e);
+          }
         }
 
-        // Show toast
+        // Show toast (will show regardless of which page section user is on)
+        console.log('[Poll] Showing toast...');
         showToast(
           newCount === 1 ? 'New email received!' : `${newCount} new emails received!`,
           'info'
@@ -545,6 +553,16 @@ export default function Home({ accounts, loading }: HomeProps) {
             </div>
           )}
 
+          {/* New email notification on Check Mail screen */}
+          {newEmailCount > 0 && (
+            <div className="bg-blue-50 text-blue-700 px-3 py-2 rounded-lg text-sm mb-4 border border-blue-200 flex items-center gap-2 animate-pulse">
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+              </svg>
+              {newEmailCount === 1 ? 'You have 1 new email!' : `You have ${newEmailCount} new emails!`}
+            </div>
+          )}
+
           <button
             onClick={loadEmails}
             disabled={loadingEmails}
@@ -560,7 +578,7 @@ export default function Home({ accounts, loading }: HomeProps) {
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                 </svg>
-                Check Mail
+                {newEmailCount > 0 ? `Check Mail (${newEmailCount} new)` : 'Check Mail'}
               </>
             )}
           </button>
@@ -972,6 +990,19 @@ export default function Home({ accounts, loading }: HomeProps) {
               </svg>
             </button>
           </div>
+
+          {/* New emails banner - shows when polling detects new emails */}
+          {newEmailCount > 0 && currentFolder === 'inbox' && (
+            <button
+              onClick={loadEmails}
+              className="w-full px-3 py-2 bg-blue-50 border-b border-blue-200 text-blue-700 text-sm font-medium hover:bg-blue-100 transition-colors flex items-center justify-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+              </svg>
+              {newEmailCount === 1 ? '1 new email' : `${newEmailCount} new emails`} — click to refresh
+            </button>
+          )}
 
           {/* Email list content */}
           <div className="flex-1 overflow-y-auto">
