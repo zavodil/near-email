@@ -24,7 +24,7 @@ services:
       context: ./smtp-server
       dockerfile: Dockerfile
     environment:
-      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD}@localhost:5432/near_email
+      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD}@postgres:5432/near_email
       MASTER_PUBLIC_KEY: ${MASTER_PUBLIC_KEY}
       SMTP_HOST: 0.0.0.0
       SMTP_PORT: 25
@@ -47,7 +47,7 @@ services:
       dockerfile: Dockerfile
     network_mode: host
     environment:
-      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD}@postgres:5432/near_email
+      DATABASE_URL: postgres://near_email:${POSTGRES_PASSWORD}@localhost:5432/near_email
       API_PORT: 8080
       EMAIL_DOMAIN: near.email
       DEFAULT_ACCOUNT_SUFFIX: .near
