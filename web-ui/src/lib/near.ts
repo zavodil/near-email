@@ -382,6 +382,14 @@ export async function getAccounts(): Promise<AccountState[]> {
 
 export async function signOut(): Promise<void> {
   if (!selector) return;
+  // Check if there's a connected wallet before trying to sign out
+  const accounts = selector.store.getState().accounts;
+  if (accounts.length === 0) {
+    // No wallet connected, just clear cached data
+    cachedSendPubkey = null;
+    cachedSendPubkeyAccount = null;
+    return;
+  }
   const wallet = await selector.wallet();
   await wallet.signOut();
   // Clear cached pubkey (user identity changed)

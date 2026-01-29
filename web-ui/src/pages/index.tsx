@@ -394,8 +394,26 @@ export default function Home({ accounts, loading }: HomeProps) {
     showModal();
   }
 
+  // Sign out wallet only (keeps payment key if configured)
+  async function handleSignOutWallet() {
+    await signOut();
+    setEmails([]);
+    setSentEmails([]);
+    setSelectedEmail(null);
+    setSelectedSentEmail(null);
+    setHasCheckedMail(false);
+    setInboxNextOffset(null);
+    setSentNextOffset(null);
+  }
+
+  // Full disconnect - sign out wallet AND clear payment key
   async function handleDisconnect() {
     await signOut();
+    // Also clear payment key (full sign out)
+    setPaymentKey(null);
+    setPaymentKeyEnabledState(false);
+    setPaymentKeyOwnerState(null);
+    setPaymentKeyHasKey(false);
     setEmails([]);
     setSentEmails([]);
     setSelectedEmail(null);
@@ -921,7 +939,7 @@ export default function Home({ accounts, loading }: HomeProps) {
                 {isConnected && (
                   <button
                     onClick={() => {
-                      handleDisconnect();
+                      handleSignOutWallet();
                       setShowAccountMenu(false);
                     }}
                     className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
