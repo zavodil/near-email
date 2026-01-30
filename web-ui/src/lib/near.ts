@@ -541,7 +541,8 @@ export async function callOutLayer(action: string, params: Record<string, any>):
     'request_execution',
     requestArgs,
     BigInt('300000000000000'), // 300 TGas
-    BigInt('5000000000000000000000') // 0.005 NEAR deposit
+    BigInt('25000000000000000000000') // 0.025 NEAR deposit    
+    
   );
 
   // Send transaction
