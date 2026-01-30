@@ -82,13 +82,14 @@ const MAX_OUTPUT_SIZE_TRANSACTION = 1_500_000;  // 1.5 MB
 const MAX_OUTPUT_SIZE_HTTPS = 25_000_000;       // 25 MB
 
 // ===== SIZE LIMITS FOR UI =====
-// Sending limits depend on mode:
-// - HTTPS (payment key): HTTP body limit = 10 MB, minus JSON/encryption overhead + base64
-// - Blockchain: NEAR event log limit = 16KB, so total payload must be ~10KB raw
-const MAX_SEND_FILE_SIZE_HTTPS = 5 * 1024 * 1024;    // 5 MB per file
-const MAX_SEND_TOTAL_SIZE_HTTPS = 7 * 1024 * 1024;   // 7 MB total
-const MAX_SEND_FILE_SIZE_BLOCKCHAIN = 8 * 1024;      // 8 KB per file
-const MAX_SEND_TOTAL_SIZE_BLOCKCHAIN = 10 * 1024;    // 10 KB total (NEAR event log limit ~16KB, minus overhead)
+// Sending limits - both modes now have similar limits after LARGE_PAYLOAD_PLAN implementation
+// (input_data stored in contract, not in event logs)
+// - HTTPS: HTTP body limit = 10 MB, minus JSON/encryption overhead + base64
+// - Blockchain: NEAR RPC json_payload_max_size = 10 MB, minus overhead + base64
+const MAX_SEND_FILE_SIZE_HTTPS = 5 * 1024 * 1024;       // 5 MB per file
+const MAX_SEND_TOTAL_SIZE_HTTPS = 7 * 1024 * 1024;      // 7 MB total
+const MAX_SEND_FILE_SIZE_BLOCKCHAIN = 5 * 1024 * 1024;  // 5 MB per file (same as HTTPS now)
+const MAX_SEND_TOTAL_SIZE_BLOCKCHAIN = 7 * 1024 * 1024; // 7 MB total (RPC limit 10MB, minus overhead + base64)
 
 // Download limits (max_output_size with ~33% base64 overhead accounted)
 export const MAX_DOWNLOAD_SIZE_TRANSACTION = 1_100_000; // ~1.1 MB raw (1.5 MB / 1.33)

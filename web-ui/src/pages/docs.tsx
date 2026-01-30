@@ -376,13 +376,13 @@ export default function DocsPage() {
                 <tbody className="divide-y divide-gray-100">
                   <tr>
                     <td className="py-3 px-4 text-gray-700">Send: per file</td>
-                    <td className="text-center py-3 px-4 text-blue-600">8 KB</td>
-                    <td className="text-center py-3 px-4 text-green-600 font-medium">5 MB</td>
+                    <td className="text-center py-3 px-4 text-gray-600">5 MB</td>
+                    <td className="text-center py-3 px-4 text-gray-600">5 MB</td>
                   </tr>
                   <tr className="bg-gray-50/50">
                     <td className="py-3 px-4 text-gray-700">Send: total (body + attachments)</td>
-                    <td className="text-center py-3 px-4 text-blue-600">10 KB</td>
-                    <td className="text-center py-3 px-4 text-green-600 font-medium">7 MB</td>
+                    <td className="text-center py-3 px-4 text-gray-600">7 MB</td>
+                    <td className="text-center py-3 px-4 text-gray-600">7 MB</td>
                   </tr>
                   <tr>
                     <td className="py-3 px-4 text-gray-700">Download attachment</td>
@@ -423,7 +423,7 @@ export default function DocsPage() {
                 <ul className="space-y-1 text-gray-600 text-sm">
                   <li>&bull; Sign each request with wallet</li>
                   <li>&bull; Pay gas fees per transaction</li>
-                  <li>&bull; Max 10 KB send (text-only emails)</li>
+                  <li>&bull; Max 7 MB send (with attachments)</li>
                   <li>&bull; Max 1.1 MB attachment download</li>
                   <li>&bull; No prepayment needed</li>
                 </ul>
