@@ -82,9 +82,13 @@ const MAX_OUTPUT_SIZE_TRANSACTION = 1_500_000;  // 1.5 MB
 const MAX_OUTPUT_SIZE_HTTPS = 25_000_000;       // 25 MB
 
 // ===== SIZE LIMITS FOR UI =====
-// Sending limits (HTTP body limit = 10 MB, minus JSON/encryption overhead + base64)
-export const MAX_SEND_FILE_SIZE = 5 * 1024 * 1024; // 5 MB per file
-export const MAX_SEND_TOTAL_SIZE = 7 * 1024 * 1024; // 7 MB total
+// Sending limits depend on mode:
+// - HTTPS (payment key): HTTP body limit = 10 MB, minus JSON/encryption overhead + base64
+// - Blockchain: NEAR event log limit = 16KB, so total payload must be ~10KB raw
+const MAX_SEND_FILE_SIZE_HTTPS = 5 * 1024 * 1024;    // 5 MB per file
+const MAX_SEND_TOTAL_SIZE_HTTPS = 7 * 1024 * 1024;   // 7 MB total
+const MAX_SEND_FILE_SIZE_BLOCKCHAIN = 8 * 1024;      // 8 KB per file
+const MAX_SEND_TOTAL_SIZE_BLOCKCHAIN = 10 * 1024;    // 10 KB total (NEAR event log limit ~16KB, minus overhead)
 
 // Download limits (max_output_size with ~33% base64 overhead accounted)
 export const MAX_DOWNLOAD_SIZE_TRANSACTION = 1_100_000; // ~1.1 MB raw (1.5 MB / 1.33)
@@ -333,6 +337,18 @@ export function isPaymentKeyMode(): boolean {
 // Get max download size for current mode (used for attachment size checks)
 export function getMaxDownloadSize(): number {
   return isPaymentKeyMode() ? MAX_DOWNLOAD_SIZE_HTTPS : MAX_DOWNLOAD_SIZE_TRANSACTION;
+}
+
+// Get max send file size for current mode
+export function getMaxSendFileSize(): number {
+  return isPaymentKeyMode() ? MAX_SEND_FILE_SIZE_HTTPS : MAX_SEND_FILE_SIZE_BLOCKCHAIN;
+}
+
+// Get max send total size for current mode
+// Note: This is the total size of email body + all attachments BEFORE encryption
+// Blockchain mode is limited by NEAR's 16KB event log limit
+export function getMaxSendTotalSize(): number {
+  return isPaymentKeyMode() ? MAX_SEND_TOTAL_SIZE_HTTPS : MAX_SEND_TOTAL_SIZE_BLOCKCHAIN;
 }
 
 // Get default max output size based on current mode

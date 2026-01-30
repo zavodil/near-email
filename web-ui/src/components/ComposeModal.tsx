@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import type { Attachment } from '@/lib/near';
-import { MAX_SEND_FILE_SIZE, MAX_SEND_TOTAL_SIZE } from '@/lib/near';
+import { getMaxSendFileSize, getMaxSendTotalSize, isPaymentKeyMode } from '@/lib/near';
 
 // Network configuration
 const NETWORK_ID = process.env.NEXT_PUBLIC_NETWORK_ID || 'mainnet';
@@ -187,14 +187,18 @@ export default function ComposeModal({
     const files = e.target.files;
     if (!files) return;
 
+    const maxFileSize = getMaxSendFileSize();
+    const maxTotalSize = getMaxSendTotalSize();
+    const modeHint = isPaymentKeyMode() ? '' : ' Use Payment Key mode for larger attachments.';
+
     for (const file of Array.from(files)) {
-      if (file.size > MAX_SEND_FILE_SIZE) {
-        setError(`File "${file.name}" is too large (${formatSize(file.size)}). Maximum: ${formatSize(MAX_SEND_FILE_SIZE)} per file`);
+      if (file.size > maxFileSize) {
+        setError(`File "${file.name}" is too large (${formatSize(file.size)}). Maximum: ${formatSize(maxFileSize)} per file.${modeHint}`);
         continue;
       }
 
-      if (getTotalSize() + file.size > MAX_SEND_TOTAL_SIZE) {
-        setError(`Total size (${formatSize(getTotalSize() + file.size)}) exceeds limit (${formatSize(MAX_SEND_TOTAL_SIZE)}). Remove some attachments.`);
+      if (getTotalSize() + file.size > maxTotalSize) {
+        setError(`Total size (${formatSize(getTotalSize() + file.size)}) exceeds limit (${formatSize(maxTotalSize)}).${modeHint}`);
         break;
       }
 
@@ -344,17 +348,17 @@ export default function ComposeModal({
                   {attachments.length} {attachments.length === 1 ? 'file' : 'files'}
                 </span>
                 <span className="text-xs text-gray-400">
-                  {formatSize(getTotalSize())} / {formatSize(MAX_SEND_TOTAL_SIZE)}
+                  {formatSize(getTotalSize())} / {formatSize(getMaxSendTotalSize())}
                 </span>
               </div>
               {/* Progress bar */}
               <div className="w-full bg-gray-200 rounded-full h-1.5">
                 <div
                   className={`h-1.5 rounded-full transition-all ${
-                    getTotalSize() > MAX_SEND_TOTAL_SIZE * 0.9 ? 'bg-red-500' :
-                    getTotalSize() > MAX_SEND_TOTAL_SIZE * 0.7 ? 'bg-yellow-500' : 'bg-blue-500'
+                    getTotalSize() > getMaxSendTotalSize() * 0.9 ? 'bg-red-500' :
+                    getTotalSize() > getMaxSendTotalSize() * 0.7 ? 'bg-yellow-500' : 'bg-blue-500'
                   }`}
-                  style={{ width: `${Math.min(100, (getTotalSize() / MAX_SEND_TOTAL_SIZE) * 100)}%` }}
+                  style={{ width: `${Math.min(100, (getTotalSize() / getMaxSendTotalSize()) * 100)}%` }}
                 />
               </div>
               <div className="flex flex-wrap gap-1.5">

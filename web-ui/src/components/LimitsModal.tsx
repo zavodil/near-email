@@ -47,15 +47,15 @@ export default function LimitsModal({ isOpen, onClose, isHttpsMode }: LimitsModa
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              <tr className={!isHttpsMode ? 'bg-blue-50/30' : ''}>
+              <tr className={!isHttpsMode ? 'bg-blue-50/30' : 'bg-green-50/30'}>
                 <td className="py-2.5 px-3 text-gray-700">Send: per file</td>
-                <td className="text-center py-2.5 px-3 text-gray-600">5 MB</td>
-                <td className="text-center py-2.5 px-3 text-gray-600">5 MB</td>
+                <td className="text-center py-2.5 px-3 text-blue-600">8 KB</td>
+                <td className="text-center py-2.5 px-3 text-green-600 font-medium">5 MB</td>
               </tr>
-              <tr className={!isHttpsMode ? 'bg-blue-50/30' : ''}>
-                <td className="py-2.5 px-3 text-gray-700">Send: total</td>
-                <td className="text-center py-2.5 px-3 text-gray-600">7 MB</td>
-                <td className="text-center py-2.5 px-3 text-gray-600">7 MB</td>
+              <tr className={!isHttpsMode ? 'bg-blue-50/30' : 'bg-green-50/30'}>
+                <td className="py-2.5 px-3 text-gray-700 font-medium">Send: total (body + attachments)</td>
+                <td className="text-center py-2.5 px-3 text-blue-600 font-medium">10 KB</td>
+                <td className="text-center py-2.5 px-3 text-green-600 font-semibold">7 MB</td>
               </tr>
               <tr className={!isHttpsMode ? 'bg-blue-50/30' : 'bg-green-50/30'}>
                 <td className="py-2.5 px-3 text-gray-700 font-medium">Download attachment</td>
@@ -79,7 +79,7 @@ export default function LimitsModal({ isOpen, onClose, isHttpsMode }: LimitsModa
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <div className="text-sm text-yellow-800">
-                <strong>Tip:</strong> Connect with a Payment Key to unlock higher download limits (18 MB vs 1.1 MB for attachments).
+                <strong>Tip:</strong> Connect with a Payment Key to send larger emails (7 MB vs 10 KB) and download larger attachments (18 MB vs 1.1 MB).
               </div>
             </div>
           </div>
