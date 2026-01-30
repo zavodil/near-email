@@ -39,6 +39,32 @@ interface HomeProps {
 
 type Folder = 'inbox' | 'sent';
 
+// Account validation
+const ACCOUNT_SUFFIX = process.env.NEXT_PUBLIC_ACCOUNT_SUFFIX || 'near';
+
+function validateAccountId(accountId: string): { valid: boolean; error?: string } {
+  const suffix = `.${ACCOUNT_SUFFIX}`;
+
+  // Check if account ends with the correct suffix
+  if (!accountId.endsWith(suffix)) {
+    return {
+      valid: false,
+      error: `Only .${ACCOUNT_SUFFIX} accounts are supported. Your account "${accountId}" is not a .${ACCOUNT_SUFFIX} account.`,
+    };
+  }
+
+  // Check for subdomains (e.g., acc.name.near has 3 parts, alice.near has 2 parts)
+  const parts = accountId.split('.');
+  if (parts.length > 2) {
+    return {
+      valid: false,
+      error: `Subdomain accounts are not supported. Please use a top-level account like "yourname.${ACCOUNT_SUFFIX}" instead of "${accountId}".`,
+    };
+  }
+
+  return { valid: true };
+}
+
 export default function Home({ accounts, loading }: HomeProps) {
   const [emails, setEmails] = useState<Email[]>([]);
   const [sentEmails, setSentEmails] = useState<SentEmail[]>([]);
@@ -118,6 +144,9 @@ export default function Home({ accounts, loading }: HomeProps) {
   const effectiveAccountId = paymentKeyEnabled && paymentKeyOwner
     ? paymentKeyOwner
     : accountId;
+
+  // Validate account ID
+  const accountValidation = effectiveAccountId ? validateAccountId(effectiveAccountId) : { valid: true };
 
   // Initialize send pubkey from localStorage when account changes
   // This allows Compose to work immediately after page reload (no transaction needed)
@@ -299,6 +328,23 @@ export default function Home({ accounts, loading }: HomeProps) {
       document.title = 'near.email';
     };
   }, []);
+
+  // Update favicon based on new email count
+  useEffect(() => {
+    const updateFavicon = (hasNotification: boolean) => {
+      const link = document.querySelector("link[rel~='icon']") as HTMLLinkElement | null;
+      if (link) {
+        link.href = hasNotification ? '/favicon-notification.ico' : '/favicon.ico';
+      }
+    };
+
+    updateFavicon(newEmailCount > 0);
+
+    // Cleanup: reset favicon on unmount
+    return () => {
+      updateFavicon(false);
+    };
+  }, [newEmailCount]);
 
   // Handle both .near and .testnet suffixes
   const emailAddress = effectiveAccountId
@@ -516,6 +562,43 @@ export default function Home({ accounts, loading }: HomeProps) {
           <div className="inline-block w-8 h-8 border-3 border-gray-200 border-t-blue-500 rounded-full animate-spin mb-4"></div>
           <p className="text-gray-500">Loading...</p>
         </div>
+      </div>
+    );
+  }
+
+  // Invalid account screen - account doesn't meet requirements
+  if (canUseApp && !accountValidation.valid) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-gradient-to-br from-gray-50 to-gray-100">
+        <h1 className="text-3xl font-bold text-gray-900 mb-6">near.email</h1>
+
+        <div className="bg-white rounded-2xl shadow-xl border border-gray-100 p-6 max-w-md w-full text-center">
+          <div className="w-14 h-14 bg-gradient-to-br from-red-400 to-red-600 rounded-full flex items-center justify-center text-white text-xl mx-auto mb-4">
+            <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+          </div>
+          <p className="text-sm text-gray-500 mb-1">Connected as</p>
+          <p className="font-semibold text-gray-900 mb-4">{effectiveAccountId}</p>
+
+          <div className="bg-red-50 text-red-700 px-4 py-3 rounded-lg text-sm mb-6 border border-red-100 text-left">
+            {accountValidation.error}
+          </div>
+
+          <button
+            onClick={handleDisconnect}
+            className="w-full bg-gray-900 text-white py-2.5 px-6 rounded-xl font-medium hover:bg-gray-800 transition-colors shadow-sm"
+          >
+            Disconnect & Try Another Account
+          </button>
+        </div>
+
+        <p className="text-xs text-gray-400 mt-6">
+          Powered by{' '}
+          <a href="https://outlayer.fastnear.com" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">NEAR Outlayer</a>
+          {' '}&bull;{' '}
+          <a href="/docs" className="text-blue-500 hover:underline">How it works</a>
+        </p>
       </div>
     );
   }
@@ -826,22 +909,12 @@ export default function Home({ accounts, loading }: HomeProps) {
         <div className="flex items-center gap-2">
           <button
             onClick={handleOpenCompose}
-            className="flex items-center gap-1.5 bg-blue-600 text-white px-3 py-1.5 text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
+            className="ml-2 flex items-center gap-1.5 bg-blue-600 text-white px-3 py-1.5 text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
             Compose
-          </button>
-          {/* Limits info button */}
-          <button
-            onClick={() => setShowLimitsModal(true)}
-            className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-            title="View size limits"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
           </button>
           {/* Invites button */}
           <button
@@ -853,16 +926,6 @@ export default function Home({ accounts, loading }: HomeProps) {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
             </svg>
           </button>
-          {/* Docs link */}
-          <a
-            href="/docs"
-            className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-            title="Documentation"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-            </svg>
-          </a>
           {/* Account dropdown */}
           <div className="relative">
             <button
@@ -933,6 +996,31 @@ export default function Home({ accounts, loading }: HomeProps) {
                       </button>
                     )}
                   </div>
+                </div>
+
+                {/* Limits & Docs links */}
+                <div className="border-b border-gray-100">
+                  <button
+                    onClick={() => {
+                      setShowLimitsModal(true);
+                      setShowAccountMenu(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors flex items-center gap-2"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Size limits
+                  </button>
+                  <a
+                    href="/docs"
+                    className="w-full text-left px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors flex items-center gap-2"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                    </svg>
+                    Documentation
+                  </a>
                 </div>
 
                 {/* Sign out button (only when wallet connected) */}

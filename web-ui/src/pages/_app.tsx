@@ -1,6 +1,7 @@
 import '@/styles/globals.css';
 import '@near-wallet-selector/modal-ui/styles.css';
 import type { AppProps } from 'next/app';
+import Head from 'next/head';
 import { useEffect, useState } from 'react';
 import { initWalletSelector, getAccounts, initPaymentKey } from '@/lib/near';
 import type { AccountState } from '@near-wallet-selector/core';
@@ -36,10 +37,15 @@ export default function App({ Component, pageProps }: AppProps) {
   }, []);
 
   return (
-    <Component
-      {...pageProps}
-      accounts={accounts}
-      loading={loading}
-    />
+    <>
+      <Head>
+        <link rel="icon" href="/favicon.ico" />
+      </Head>
+      <Component
+        {...pageProps}
+        accounts={accounts}
+        loading={loading}
+      />
+    </>
   );
 }
