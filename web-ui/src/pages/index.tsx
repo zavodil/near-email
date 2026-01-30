@@ -649,11 +649,10 @@ export default function Home({ accounts, loading }: HomeProps) {
 
     return (
       <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-gradient-to-br from-gray-50 to-gray-100">
-        <h1 className="text-3xl font-bold text-gray-900 mb-6">near.email</h1>
-
         <div className="bg-white rounded-2xl shadow-xl border border-gray-100 p-6 max-w-sm w-full text-center">
-          <div className="w-14 h-14 bg-gradient-to-br from-blue-400 to-blue-600 rounded-full flex items-center justify-center text-white text-xl font-bold mx-auto mb-4">
-            {effectiveAccountId?.charAt(0).toUpperCase()}
+          <div className="flex items-center justify-center gap-3 mb-6 mt-3">
+            <img src="/logo.png" alt="" className="w-10 h-auto sm:w-12" />
+            <h1 className="text-3xl font-bold text-gray-900">near.email</h1>
           </div>
           <p className="text-sm text-gray-500 mb-1">Connected as</p>
           <p className="font-semibold text-gray-900 mb-1">{effectiveAccountId}</p>
@@ -754,6 +753,11 @@ export default function Home({ accounts, loading }: HomeProps) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-gradient-to-br from-gray-50 to-gray-100">
         <div className="text-center mb-8">
+          <img
+            src="/logo.png"
+            alt="near.email"
+            className="w-16 h-auto sm:w-24 mx-auto mb-4"
+          />
           <h1 className="text-4xl font-bold text-gray-900 mb-2">near.email</h1>
           <p className="text-lg text-gray-600 font-medium">
             Blockchain-native email
@@ -910,7 +914,8 @@ export default function Home({ accounts, loading }: HomeProps) {
     <div className="min-h-screen flex flex-col bg-gray-50">
       {/* Header */}
       <header className="bg-white/80 backdrop-blur-sm border-b border-gray-100 px-4 py-3 flex items-center justify-between sticky top-0 z-40">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          <img src="/logo.png" alt="" className="w-7 h-auto sm:w-8" />
           <h1 className="text-lg font-semibold text-gray-900">near.email</h1>
           <span className="text-xs text-gray-400 hidden sm:inline">{emailAddress}</span>
         </div>
