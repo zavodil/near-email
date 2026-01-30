@@ -332,9 +332,17 @@ export default function Home({ accounts, loading }: HomeProps) {
   // Update favicon based on new email count
   useEffect(() => {
     const updateFavicon = (hasNotification: boolean) => {
-      const link = document.querySelector("link[rel~='icon']") as HTMLLinkElement | null;
-      if (link) {
-        link.href = hasNotification ? '/favicon-notification.ico' : '/favicon.ico';
+      // Update main .ico favicon
+      const icoLink = document.querySelector("link[rel='icon'][sizes='any']") as HTMLLinkElement | null;
+      if (icoLink) {
+        icoLink.href = hasNotification ? '/favicon-notification.ico' : '/favicon.ico';
+      }
+      // Fallback: update first icon link if specific selector didn't match
+      if (!icoLink) {
+        const fallbackLink = document.querySelector("link[rel~='icon']") as HTMLLinkElement | null;
+        if (fallbackLink) {
+          fallbackLink.href = hasNotification ? '/favicon-notification.ico' : '/favicon.ico';
+        }
       }
     };
 
