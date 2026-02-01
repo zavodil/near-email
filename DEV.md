@@ -92,7 +92,7 @@ use serde_json::json;
 
 // OutLayer contract (mainnet only - testnet not supported)
 const OUTLAYER_CONTRACT: &str = "outlayer.near";
-const EMAIL_PROJECT_ID: &str = "near-email";
+// Note: project_id is "zavodil.near/near-email" for external calls
 
 #[near_bindgen]
 impl NftMarketplace {
@@ -127,7 +127,7 @@ impl NftMarketplace {
             .with_attached_deposit(NearToken::from_millinear(25))
             .request_execution(
                 ExecutionSource::Project {
-                    project_id: EMAIL_PROJECT_ID.to_string(),
+                    project_id: "zavodil.near/near-email".to_string(),
                     version_key: None,
                 },
                 None,                            // resource_limits
@@ -176,7 +176,7 @@ impl LendingProtocol {
             .with_attached_deposit(NearToken::from_millinear(25))
             .request_execution(
                 ExecutionSource::Project {
-                    project_id: EMAIL_PROJECT_ID.to_string(),
+                    project_id: "zavodil.near/near-email".to_string(),
                     version_key: None,
                 },
                 None,                            // resource_limits
@@ -217,7 +217,7 @@ Pre-fund a payment key and make simple HTTPS calls. Best for server-side agents.
 
 ```typescript
 const OUTLAYER_API = 'https://api.outlayer.fastnear.com';
-const PROJECT_ID = 'near-email';
+const PROJECT_ID = 'zavodil.near/near-email';
 const PAYMENT_KEY = 'your-account.near:nonce:secret'; // From dashboard
 
 // Send email via OutLayer API (plaintext - simplest option for agents)
@@ -274,7 +274,7 @@ import os
 import requests
 
 OUTLAYER_API = "https://api.outlayer.fastnear.com"
-PROJECT_ID = "near-email"
+PROJECT_ID = "zavodil.near/near-email"
 PAYMENT_KEY = os.environ.get("OUTLAYER_PAYMENT_KEY", "your-account.near:nonce:secret")
 
 
@@ -356,13 +356,22 @@ For reading emails, you need ECDH encryption. See the [examples.md](../../skills
 
 Sign transactions directly with NEAR wallet. Attach deposit as a limit for computation costs - unused portion is automatically refunded. This is how [near.email](https://near.email) works.
 
+**CRITICAL: NEAR Transaction results are in the `outlayer.near` receipt's `SuccessValue` (base64-encoded JSON). Find the receipt where `executor_id === 'outlayer.near'`. The result is `{ "success": true, ... }` - NO `output` wrapper. Use `parseTransactionResult()` to extract it.**
+
 **JavaScript Example (with near-api-js):**
 
 ```typescript
 import { connect, keyStores, Contract } from 'near-api-js';
 
 const OUTLAYER_CONTRACT = 'outlayer.near';
-const PROJECT_ID = 'near-email';
+const PROJECT_ID = 'zavodil.near/near-email';
+
+// Required resource limits for NEAR Email
+const RESOURCE_LIMITS = {
+  max_memory_mb: 512,
+  max_instructions: 2000000000,
+  max_execution_seconds: 120,
+};
 
 // Connect to NEAR
 const near = await connect({
@@ -373,6 +382,20 @@ const near = await connect({
 
 const account = await near.account('your-account.near');
 
+// REQUIRED: Parse output from outlayer.near receipt's SuccessValue
+// Returns JSON directly: { success: true, ... } - NO "output" wrapper!
+function parseTransactionResult(result: any): any {
+  // Find receipt from outlayer.near contract (contains the execution result)
+  const outlayerReceipt = result.receipts_outcome.find(
+    (r: any) => r.outcome.executor_id === 'outlayer.near' && r.outcome.status.SuccessValue
+  );
+  if (!outlayerReceipt) {
+    throw new Error('No SuccessValue from outlayer.near');
+  }
+  const decoded = Buffer.from(outlayerReceipt.outcome.status.SuccessValue, 'base64').toString();
+  return JSON.parse(decoded); // { success: true, ... } - directly, no wrapper
+}
+
 // Send email via NEAR transaction
 async function sendEmail(to: string, subject: string, body: string) {
   const input = JSON.stringify({
@@ -382,21 +405,25 @@ async function sendEmail(to: string, subject: string, body: string) {
     body,
   });
 
-  return account.functionCall({
+  const result = await account.functionCall({
     contractId: OUTLAYER_CONTRACT,
     methodName: 'request_execution',
     args: {
       source: { Project: { project_id: PROJECT_ID, version_key: null } },
       input_data: input,
+      resource_limits: RESOURCE_LIMITS,
       response_format: 'Json',
     },
     gas: BigInt('100000000000000'), // 100 TGas
     attachedDeposit: BigInt('25000000000000000000000'), // deposit, unused refunded
   });
+
+  return parseTransactionResult(result);
 }
 
 // Usage
-await sendEmail('recipient@gmail.com', 'Hello', 'Sent via NEAR transaction!');
+const output = await sendEmail('recipient@gmail.com', 'Hello', 'Sent via NEAR transaction!');
+console.log('Email sent:', output); // { success: true, message_id: "..." }
 ```
 
 **Python Example (with py-near):**
@@ -405,9 +432,36 @@ await sendEmail('recipient@gmail.com', 'Hello', 'Sent via NEAR transaction!');
 from py_near.account import Account
 import asyncio
 import json
+import re
 
 OUTLAYER_CONTRACT = "outlayer.near"
-PROJECT_ID = "near-email"
+PROJECT_ID = "zavodil.near/near-email"
+
+# Required resource limits for NEAR Email
+RESOURCE_LIMITS = {
+    "max_memory_mb": 512,
+    "max_instructions": 2000000000,
+    "max_execution_seconds": 120,
+}
+
+
+def parse_transaction_result(result) -> dict:
+    """Parse output from outlayer.near receipt's SuccessValue (base64 JSON).
+    Returns: { success: True, ... } - directly, NO 'output' wrapper!
+    """
+    import base64
+    # Find receipt from outlayer.near contract (contains the execution result)
+    outlayer_receipt = next(
+        (r for r in result.receipts_outcome
+         if r.outcome.executor_id == "outlayer.near" and r.outcome.status.get("SuccessValue")),
+        None
+    )
+    if not outlayer_receipt:
+        raise ValueError("No SuccessValue from outlayer.near")
+    success_value = outlayer_receipt.outcome.status.get("SuccessValue")
+    decoded = base64.b64decode(success_value).decode()
+    return json.loads(decoded)  # { success: True, ... } - directly
+
 
 async def send_email(account: Account, to: str, subject: str, body: str):
     input_data = json.dumps({
@@ -417,21 +471,25 @@ async def send_email(account: Account, to: str, subject: str, body: str):
         "body": body,
     })
 
-    return await account.function_call(
+    result = await account.function_call(
         OUTLAYER_CONTRACT,
         "request_execution",
         {
             "source": {"Project": {"project_id": PROJECT_ID, "version_key": None}},
             "input_data": input_data,
+            "resource_limits": RESOURCE_LIMITS,
             "response_format": "Json",
         },
         gas=100_000_000_000_000,  # 100 TGas
         deposit=25_000_000_000_000_000_000_000,  # deposit, unused refunded
     )
 
+    return parse_transaction_result(result)
+
 # Usage
 account = Account("your-account.near", private_key="ed25519:...")
-asyncio.run(send_email(account, "recipient@gmail.com", "Hello", "Sent via NEAR!"))
+output = asyncio.run(send_email(account, "recipient@gmail.com", "Hello", "Sent via NEAR!"))
+print(f"Email sent: {output}")  # { success: True, message_id: "..." }
 ```
 
 ---

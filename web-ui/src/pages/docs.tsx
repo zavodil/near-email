@@ -16,12 +16,14 @@ export default function DocsPage() {
             <Link href="/" className="text-lg font-semibold text-gray-900 hover:text-blue-600 transition-colors">
               near.email
             </Link>
-            <Link
-              href="/"
-              className="text-sm text-gray-500 hover:text-gray-700 transition-colors"
-            >
-              Back to app
-            </Link>
+            <div className="flex items-center gap-4">
+              <Link href="/dev" className="text-sm text-gray-500 hover:text-gray-700 transition-colors">
+                Developer Docs
+              </Link>
+              <Link href="/" className="text-sm text-gray-500 hover:text-gray-700 transition-colors">
+                Back to app
+              </Link>
+            </div>
           </div>
         </header>
 
