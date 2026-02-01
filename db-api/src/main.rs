@@ -96,6 +96,9 @@ struct AppState {
     /// Secret for generating poll tokens (SHA256(account_id + poll_secret))
     /// Used by /poll/count endpoint for lightweight email count checking
     poll_secret: String,
+    /// Whether to send notification email when someone uses an invite code
+    /// Default: true
+    send_invite_success_email: bool,
 }
 
 #[tokio::main]
@@ -232,7 +235,12 @@ async fn main() -> anyhow::Result<()> {
         secret
     });
 
-    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay, api_secret, fastnear_api_url, near_rpc_url, invite_rate_limiter, poll_secret };
+    // Whether to send notification email when someone uses an invite code
+    let send_invite_success_email = env::var("SEND_INVITE_SUCCESS_EMAIL")
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true);
+
+    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay, api_secret, fastnear_api_url, near_rpc_url, invite_rate_limiter, poll_secret, send_invite_success_email };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -2115,14 +2123,16 @@ async fn use_invite(
     info!("User {} registered using invite {} from {}", body.account_id, code, inviter);
 
     // Send notification email to inviter (async, don't block registration)
-    let inviter_clone = inviter.clone();
-    let new_user = body.account_id.clone();
-    let state_clone = state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = send_invite_accepted_notification(&state_clone, &inviter_clone, &new_user).await {
-            warn!("Failed to send invite notification to {}: {}", inviter_clone, e);
-        }
-    });
+    if state.send_invite_success_email {
+        let inviter_clone = inviter.clone();
+        let new_user = body.account_id.clone();
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = send_invite_accepted_notification(&state_clone, &inviter_clone, &new_user).await {
+                warn!("Failed to send invite notification to {}: {}", inviter_clone, e);
+            }
+        });
+    }
 
     Ok(Json(UseInviteResponse { success: true, error: None }))
 }

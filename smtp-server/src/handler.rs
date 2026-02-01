@@ -113,6 +113,16 @@ impl NearEmailHandler {
         // Extract subject
         let subject = parsed.subject().unwrap_or("").to_string();
 
+        // Extract From header from email content (not SMTP envelope which may contain bounce address)
+        let from_header = parsed
+            .from()
+            .and_then(|addrs| addrs.first())
+            .map(|addr| {
+                // Use the email address from the From header
+                addr.address().unwrap_or(from).to_string()
+            })
+            .unwrap_or_else(|| from.to_string());
+
         // Extract body (prefer text/plain, fallback to text/html)
         let body = parsed
             .body_text(0)
@@ -138,7 +148,8 @@ impl NearEmailHandler {
             .collect();
 
         info!(
-            "📧 Parsed email: from={}, subject_len={}, body_len={}, attachments={}",
+            "📧 Parsed email: from={} (envelope={}), subject_len={}, body_len={}, attachments={}",
+            from_header,
             from,
             subject.len(),
             body.len(),
@@ -236,10 +247,10 @@ impl NearEmailHandler {
 
             // Store in database
             let db_pool = self.db_pool.clone();
-            let from_clone = from.to_string();
+            let sender_email = from_header.clone();
 
             self.rt_handle.block_on(async {
-                match db::store_email(&db_pool, &email_id, &account_id, &from_clone, &encrypted)
+                match db::store_email(&db_pool, &email_id, &account_id, &sender_email, &encrypted)
                     .await
                 {
                     Ok(_) => {
