@@ -754,21 +754,12 @@ async fn send_email(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SendEmailBody>,
 ) -> Result<Json<SendResponse>, StatusCode> {
-    // Check access (registration + not blacklisted)
-    match check_account_access(&state.db, &body.from_account).await? {
-        AccessCheck::Allowed => {}
-        AccessCheck::NotRegistered => {
-            return Ok(Json(SendResponse {
-                success: false,
-                error: Some("Account not registered. Please use an invite code to join.".to_string()),
-            }));
-        }
-        AccessCheck::Blacklisted(reason) => {
-            return Ok(Json(SendResponse {
-                success: false,
-                error: Some(format!("Account suspended: {}", reason)),
-            }));
-        }
+    // Check access (blacklist only)
+    if let AccessCheck::Blacklisted(reason) = check_account_access(&state.db, &body.from_account).await? {
+        return Ok(Json(SendResponse {
+            success: false,
+            error: Some(format!("Account suspended: {}", reason)),
+        }));
     }
 
     // Validate that from_account is not a subaccount
@@ -1214,29 +1205,15 @@ async fn request_email(
     State(state): State<Arc<AppState>>,
     Query(query): Query<RequestEmailQuery>,
 ) -> Result<Json<RequestEmailResponse>, StatusCode> {
-    // Check access (registration + not blacklisted)
-    match check_account_access(&state.db, &query.account_id).await? {
-        AccessCheck::Allowed => {}
-        AccessCheck::NotRegistered => {
-            // Return empty response for unregistered users (they can still see if they have pending emails)
-            // but they cannot access the actual content
-            return Ok(Json(RequestEmailResponse {
-                inbox: vec![],
-                sent: vec![],
-                inbox_count: 0,
-                sent_count: 0,
-                poll_token: None,
-            }));
-        }
-        AccessCheck::Blacklisted(_) => {
-            return Ok(Json(RequestEmailResponse {
-                inbox: vec![],
-                sent: vec![],
-                inbox_count: 0,
-                sent_count: 0,
-                poll_token: None,
-            }));
-        }
+    // Check access (blacklist only)
+    if let AccessCheck::Blacklisted(_) = check_account_access(&state.db, &query.account_id).await? {
+        return Ok(Json(RequestEmailResponse {
+            inbox: vec![],
+            sent: vec![],
+            inbox_count: 0,
+            sent_count: 0,
+            poll_token: None,
+        }));
     }
 
     // Run all queries in parallel: inbox, sent, inbox_count, sent_count
@@ -1932,77 +1909,29 @@ async fn check_user(
 /// Access check result
 enum AccessCheck {
     Allowed,
-    NotRegistered,
     Blacklisted(String),
 }
 
-/// Check if account can access email service (registered + not blacklisted)
+/// Check if account can access email service (only blacklist check, no invite required)
 /// Returns AccessCheck enum with reason if denied
 async fn check_account_access(db: &PgPool, account_id: &str) -> Result<AccessCheck, StatusCode> {
-    // Check if invites are enabled (if disabled, everyone has access)
-    let invites_enabled: bool = sqlx::query_scalar(
-        "SELECT value = 'true' FROM invite_settings WHERE key = 'invites_enabled'"
-    )
-    .fetch_optional(db)
-    .await
-    .map_err(|e| {
-        error!("Failed to check invite settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?
-    .unwrap_or(true);
-
-    // Check if account is blacklisted (always check, even if invites disabled)
-    // reason column is nullable, so we get Option<Option<String>> from fetch_optional
-    let blacklist_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM blacklist WHERE account_id = $1)"
+    let blacklist_reason: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT reason FROM blacklist WHERE account_id = $1"
     )
     .bind(account_id)
-    .fetch_one(db)
+    .fetch_optional(db)
     .await
     .map_err(|e| {
         error!("Failed to check blacklist: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    if blacklist_exists {
-        // Get the reason if exists
-        let reason: Option<String> = sqlx::query_scalar(
-            "SELECT reason FROM blacklist WHERE account_id = $1"
-        )
-        .bind(account_id)
-        .fetch_optional(db)
-        .await
-        .map_err(|e| {
-            error!("Failed to get blacklist reason: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .flatten(); // Option<Option<String>> -> Option<String>
-
-        return Ok(AccessCheck::Blacklisted(reason.unwrap_or_else(|| "Account suspended".to_string())));
+    match blacklist_reason {
+        Some(reason) => Ok(AccessCheck::Blacklisted(
+            reason.unwrap_or_else(|| "Account suspended".to_string())
+        )),
+        None => Ok(AccessCheck::Allowed),
     }
-
-    // If invites disabled, everyone (except blacklisted) has access
-    if !invites_enabled {
-        return Ok(AccessCheck::Allowed);
-    }
-
-    // Check registration
-    let registered: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM registered_users WHERE account_id = $1)"
-    )
-    .bind(account_id)
-    .fetch_one(db)
-    .await
-    .map_err(|e| {
-        error!("Failed to check registration: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    if !registered {
-        return Ok(AccessCheck::NotRegistered);
-    }
-
-    Ok(AccessCheck::Allowed)
 }
 
 /// Increment email stats for received email

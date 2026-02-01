@@ -250,39 +250,32 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
         } => {
             use base64::{engine::general_purpose::STANDARD, Engine};
 
-            eprintln!("[DEBUG] SendEmail: start, encrypted_data len={}", encrypted_data.len());
-
             let account_id = get_signer()?;
-            eprintln!("[DEBUG] SendEmail: account_id={}", account_id);
 
-            let ephemeral_pubkey_bytes = hex::decode(&ephemeral_pubkey)
-                .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?;
+            // Parse ephemeral_pubkey if provided (for response encryption)
+            let ephemeral_pubkey_bytes = match &ephemeral_pubkey {
+                Some(pk) => Some(hex::decode(pk)
+                    .map_err(|e| format!("Invalid ephemeral_pubkey hex: {}", e))?),
+                None => None,
+            };
 
             // Validate sender account
             validate_sender_account(&account_id, default_account_suffix)?;
-            eprintln!("[DEBUG] SendEmail: validated sender");
 
             // Derive user's private key for decryption
             let user_privkey = crypto::derive_user_privkey(&master_privkey, &account_id)?;
-            eprintln!("[DEBUG] SendEmail: derived privkey");
 
             // Decrypt the combined payload (to, subject, body, attachments)
-            eprintln!("[DEBUG] SendEmail: decoding base64...");
             let ciphertext = STANDARD.decode(&encrypted_data)
                 .map_err(|e| format!("Invalid encrypted_data base64: {}", e))?;
-            eprintln!("[DEBUG] SendEmail: ciphertext len={}", ciphertext.len());
 
-            eprintln!("[DEBUG] SendEmail: decrypting EC01...");
             let decrypted_bytes = crypto::decrypt_email(&user_privkey, &ciphertext)?;
-            eprintln!("[DEBUG] SendEmail: decrypted, len={}", decrypted_bytes.len());
 
             let decrypted_json = String::from_utf8(decrypted_bytes)
                 .map_err(|e| format!("Invalid UTF-8 in encrypted_data: {}", e))?;
-            eprintln!("[DEBUG] SendEmail: parsed UTF-8");
 
             let payload: SendEmailPayload = serde_json::from_str(&decrypted_json)
                 .map_err(|e| format!("Invalid SendEmailPayload JSON: {}", e))?;
-            eprintln!("[DEBUG] SendEmail: parsed JSON, attachments count={}", payload.attachments.len());
 
             let to = payload.to;
             let subject = payload.subject;
@@ -307,7 +300,6 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 body.clone()
             };
 
-            eprintln!("[DEBUG] SendEmail: building email content...");
             // Build email content (with or without attachments) - MIME format for actual sending
             let email_content = build_email_content(
                 &sender_email,
@@ -316,14 +308,11 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 &body_with_sig,
                 &attachments,
             );
-            eprintln!("[DEBUG] SendEmail: email_content len={}", email_content.len());
 
             // Generate UUID for sent email (needed before storing attachments)
             let sent_email_id = uuid::Uuid::new_v4().to_string();
-            eprintln!("[DEBUG] SendEmail: generated sent_email_id={}", sent_email_id);
 
             // Build sent folder content with lazy attachments (stores large attachments separately)
-            eprintln!("[DEBUG] SendEmail: building sent email with lazy attachments...");
             let sent_result = build_sent_email_with_lazy_attachments(
                 db_api_url,
                 &sent_email_id,
@@ -336,31 +325,24 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 &attachments,
                 api_secret.as_deref(),
             )?;
-            eprintln!("[DEBUG] SendEmail: sent_content len={}", sent_result.json_content.len());
-
-            // Encrypt sent content for sender's sent folder
-            eprintln!("[DEBUG] SendEmail: encrypting for sender...");
+            
+            // Encrypt sent content for sender's sent folder            
             let encrypted_for_sender = crypto::encrypt_for_account(
                 &master_privkey,
                 &account_id,
                 sent_result.json_content.as_bytes(),
             )?;
-            eprintln!("[DEBUG] SendEmail: encrypted_for_sender len={}", encrypted_for_sender.len());
 
             let message_id = if to.to_lowercase().ends_with(internal_suffix) {
                 // Internal email - encrypt and store directly
                 let recipient_account = extract_account_from_email(&to, internal_suffix, default_account_suffix);
-                eprintln!("[DEBUG] SendEmail: internal email to {}", recipient_account);
 
-                eprintln!("[DEBUG] SendEmail: encrypting for recipient...");
                 let encrypted = crypto::encrypt_for_account(
                     &master_privkey,
                     &recipient_account,
                     email_content.as_bytes(),
                 )?;
-                eprintln!("[DEBUG] SendEmail: encrypted len={}", encrypted.len());
 
-                eprintln!("[DEBUG] SendEmail: storing internal email...");
                 let email_id = db::store_internal_email(
                     db_api_url,
                     &recipient_account,
@@ -368,10 +350,8 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                     &encrypted,
                     api_secret.as_deref(),
                 )?;
-                eprintln!("[DEBUG] SendEmail: stored, email_id={}", email_id);
 
                 // Store in sender's sent folder with pre-generated ID
-                eprintln!("[DEBUG] SendEmail: storing sent email...");
                 let _ = db::store_sent_email(
                     db_api_url,
                     &account_id,
@@ -381,13 +361,10 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                     Some(&sent_email_id),
                     api_secret.as_deref(),
                 );
-                eprintln!("[DEBUG] SendEmail: stored sent");
 
                 Some(email_id)
             } else {
                 // External email - send via SMTP relay with attachments
-                eprintln!("[DEBUG] SendEmail: external email to {}", to);
-                eprintln!("[DEBUG] SendEmail: calling db::send_email_with_attachments...");
                 db::send_email_with_attachments(
                     db_api_url,
                     &account_id,
@@ -397,10 +374,8 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                     &attachments,
                     api_secret.as_deref(),
                 )?;
-                eprintln!("[DEBUG] SendEmail: sent external email");
 
                 // Store in sender's sent folder with pre-generated ID
-                eprintln!("[DEBUG] SendEmail: storing sent email...");
                 let _ = db::store_sent_email(
                     db_api_url,
                     &account_id,
@@ -410,52 +385,183 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                     Some(&sent_email_id),
                     api_secret.as_deref(),
                 );
-                eprintln!("[DEBUG] SendEmail: stored sent");
 
                 None
             };
 
-            // Fetch all emails (inbox + sent) with lazy loading
-            // Now that sent emails use lazy attachments, response should be within size limit
-            let max_size = DEFAULT_MAX_OUTPUT_SIZE;
-            let mut result = fetch_request_email(
-                db_api_url,
-                &account_id,
-                &user_privkey,
-                max_size,
-                0,
-                0,
-                api_secret.as_deref(),
-                need_poll_token.unwrap_or(false),
-            )?;
+            // If ephemeral_pubkey provided, fetch emails and encrypt response
+            // Otherwise return simple status without inbox/sent
+            let encrypted_data = match ephemeral_pubkey_bytes {
+                Some(epk_bytes) => {
+                    // Fetch all emails (inbox + sent) with lazy loading
+                    // Now that sent emails use lazy attachments, response should be within size limit
+                    let max_size = DEFAULT_MAX_OUTPUT_SIZE;
+                    let mut result = fetch_request_email(
+                        db_api_url,
+                        &account_id,
+                        &user_privkey,
+                        max_size,
+                        0,
+                        0,
+                        api_secret.as_deref(),
+                        need_poll_token.unwrap_or(false),
+                    )?;
 
-            // Check if just-sent email is already in the fetched results
-            // (might not be due to timing - we just stored it)
-            let sent_email_exists = result.email_data.sent.iter().any(|e| e.id == sent_email_id);
-            if !sent_email_exists {
-                // Add the just-sent email to the beginning of sent list
-                let sent_email = SentEmail {
-                    id: sent_email_id.clone(),
-                    to: to.clone(),
-                    subject: subject.clone(),
-                    body: body_with_sig.clone(),
-                    tx_hash: tx_hash.clone(),
-                    sent_at: get_current_timestamp(),
-                    attachments: sent_result.attachments,
-                };
-                result.email_data.sent.insert(0, sent_email);
-            }
+                    // Check if just-sent email is already in the fetched results
+                    // (might not be due to timing - we just stored it)
+                    let sent_email_exists = result.email_data.sent.iter().any(|e| e.id == sent_email_id);
+                    if !sent_email_exists {
+                        // Add the just-sent email to the beginning of sent list
+                        let sent_email = SentEmail {
+                            id: sent_email_id.clone(),
+                            to: to.clone(),
+                            subject: subject.clone(),
+                            body: body_with_sig.clone(),
+                            tx_hash: tx_hash.clone(),
+                            sent_at: get_current_timestamp(),
+                            attachments: sent_result.attachments,
+                        };
+                        result.email_data.sent.insert(0, sent_email);
+                    }
 
-            let data_json = serde_json::to_vec(&result.email_data)?;
-            let encrypted = ecies::encrypt(&ephemeral_pubkey_bytes, &data_json)
-                .map_err(|e| format!("Failed to encrypt response: {}", e))?;
+                    let data_json = serde_json::to_vec(&result.email_data)?;
+                    let encrypted = ecies::encrypt(&epk_bytes, &data_json)
+                        .map_err(|e| format!("Failed to encrypt response: {}", e))?;
 
-            eprintln!("[DEBUG] SendEmail: returning success response with all emails");
+                    Some(STANDARD.encode(&encrypted))
+                }
+                None => None,
+            };
 
             Ok(Response::SendEmail(SendEmailResponse {
                 success: true,
                 message_id,
-                encrypted_data: STANDARD.encode(&encrypted),
+                encrypted_data,
+            }))
+        }
+
+        // ⚠️ Security warning - email content is PUBLIC on-chain
+        Request::SendEmailPlaintext {
+            to,
+            subject,
+            body,
+            attachments,
+        } => {            
+            let account_id = get_signer()?;
+
+            // Validate sender account
+            validate_sender_account(&account_id, default_account_suffix)?;
+
+            // Check if internal email (@near.email)
+            let internal_suffix = "@near.email";
+            let tx_hash = env::transaction_hash();
+
+            // Build sender email address
+            let sender_local = account_id
+                .strip_suffix(default_account_suffix)
+                .unwrap_or(&account_id);
+            let sender_email = format!("{}@near.email", sender_local);
+
+            // Add signature if configured
+            let body_with_sig = if let Some(sig_template) = email_signature {
+                let signature = sig_template.replace("%account%", &account_id);
+                insert_signature_before_quote(&body, &signature)
+            } else {
+                body.clone()
+            };
+
+            // Build email content (MIME format for actual sending)
+            let email_content = build_email_content(
+                &sender_email,
+                &to,
+                &subject,
+                &body_with_sig,
+                &attachments,
+            );
+
+            // Generate UUID for sent email
+            let sent_email_id = uuid::Uuid::new_v4().to_string();
+
+            // Build sent folder content with lazy attachments
+            let sent_result = build_sent_email_with_lazy_attachments(
+                db_api_url,
+                &sent_email_id,
+                &account_id,
+                &master_privkey,
+                &sender_email,
+                &to,
+                &subject,
+                &body_with_sig,
+                &attachments,
+                api_secret.as_deref(),
+            )?;
+
+            // Encrypt sent content for sender's sent folder
+            let encrypted_for_sender = crypto::encrypt_for_account(
+                &master_privkey,
+                &account_id,
+                sent_result.json_content.as_bytes(),
+            )?;
+
+            let message_id = if to.to_lowercase().ends_with(internal_suffix) {
+                // Internal email - encrypt and store directly
+                let recipient_account = extract_account_from_email(&to, internal_suffix, default_account_suffix);
+
+                let encrypted = crypto::encrypt_for_account(
+                    &master_privkey,
+                    &recipient_account,
+                    email_content.as_bytes(),
+                )?;
+
+                let email_id = db::store_internal_email(
+                    db_api_url,
+                    &recipient_account,
+                    &sender_email,
+                    &encrypted,
+                    api_secret.as_deref(),
+                )?;
+
+                // Store in sender's sent folder
+                let _ = db::store_sent_email(
+                    db_api_url,
+                    &account_id,
+                    &to,
+                    &encrypted_for_sender,
+                    tx_hash.as_deref(),
+                    Some(&sent_email_id),
+                    api_secret.as_deref(),
+                );
+
+                Some(email_id)
+            } else {
+                // External email - send via SMTP relay
+                db::send_email_with_attachments(
+                    db_api_url,
+                    &account_id,
+                    &to,
+                    &subject,
+                    &body_with_sig,
+                    &attachments,
+                    api_secret.as_deref(),
+                )?;
+
+                // Store in sender's sent folder
+                let _ = db::store_sent_email(
+                    db_api_url,
+                    &account_id,
+                    &to,
+                    &encrypted_for_sender,
+                    tx_hash.as_deref(),
+                    Some(&sent_email_id),
+                    api_secret.as_deref(),
+                );
+
+                None
+            };
+
+            Ok(Response::SendEmailPlaintext(SendEmailPlaintextResponse {
+                success: true,
+                message_id,
             }))
         }
 
@@ -511,6 +617,21 @@ fn process() -> Result<Response, Box<dyn std::error::Error>> {
                 success: true,
                 inbox_count: result.inbox_count,
                 sent_count: result.sent_count,
+            }))
+        }
+
+        Request::GetSendPubkey => {
+            let account_id = get_signer()?;
+
+            // Validate named account (only .near/.testnet accounts can use email)
+            validate_sender_account(&account_id, default_account_suffix)?;
+
+            // Derive sender's pubkey (deterministic, can be cached by agent)
+            let send_pubkey = crypto::derive_user_pubkey(&master_privkey, &account_id)?;
+
+            Ok(Response::GetSendPubkey(GetSendPubkeyResponse {
+                success: true,
+                send_pubkey: hex::encode(&send_pubkey),
             }))
         }
 

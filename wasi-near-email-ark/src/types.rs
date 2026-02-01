@@ -42,20 +42,46 @@ pub enum Request {
     },
 
     /// Send email from the signer's account
-    /// Returns fresh inbox/sent preview after sending
+    /// Returns fresh inbox/sent preview after sending (if ephemeral_pubkey provided)
     /// All email data (to, subject, body, attachments) is encrypted in a single payload
     /// to keep recipient address private on-chain
     SendEmail {
         /// Base64-encoded ECIES ciphertext containing SendEmailPayload JSON
         encrypted_data: String,
-        /// Client's ephemeral public key for encrypting response
-        ephemeral_pubkey: String,
+        /// Client's ephemeral public key for encrypting response (optional)
+        /// If not provided, returns simple status without inbox/sent
+        #[serde(default)]
+        ephemeral_pubkey: Option<String>,
         /// Max output size in bytes (default: 1.5MB)
         #[serde(default)]
         max_output_size: Option<usize>,
         /// If true, generate and return a new poll token (for lightweight /poll/count endpoint)
         #[serde(default)]
         need_poll_token: Option<bool>,
+    },
+
+    /// Send email with PLAINTEXT content (visible on-chain!)
+    ///
+    /// ⚠️ WARNING: Email content (to, subject, body) is stored PUBLICLY on the NEAR blockchain.
+    /// Use ONLY for automated notifications where content is not private:
+    /// - NFT sale notifications
+    /// - DeFi liquidation alerts
+    /// - DAO voting reminders
+    /// - Service status updates
+    ///
+    /// DO NOT use for private messages or sensitive data.
+    ///
+    /// Returns simple { success: true, message_id: "..." } - no encrypted data.
+    SendEmailPlaintext {
+        /// Recipient email address
+        to: String,
+        /// Email subject line
+        subject: String,
+        /// Email body text
+        body: String,
+        /// Attachments (optional)
+        #[serde(default)]
+        attachments: Vec<Attachment>,
     },
 
     /// Delete an email (must belong to signer)
@@ -74,6 +100,11 @@ pub enum Request {
 
     /// Get email count for the signer
     GetEmailCount,
+
+    /// Get sender's public key for encrypting emails
+    /// Returns the derived pubkey without fetching any emails
+    /// Agent can cache this permanently (it's deterministic)
+    GetSendPubkey,
 
     /// Get master public key (for SMTP server encryption)
     GetMasterPublicKey,
@@ -98,8 +129,10 @@ pub enum Request {
 pub enum Response {
     GetEmails(GetEmailsResponse),
     SendEmail(SendEmailResponse),
+    SendEmailPlaintext(SendEmailPlaintextResponse),
     DeleteEmail(DeleteEmailResponse),
     GetEmailCount(GetEmailCountResponse),
+    GetSendPubkey(GetSendPubkeyResponse),
     GetMasterPublicKey(GetMasterPublicKeyResponse),
     GetAttachment(GetAttachmentResponse),
     MigrateMasterKey(MigrateMasterKeyResponse),
@@ -129,8 +162,17 @@ pub struct SendEmailResponse {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
-    /// Base64-encoded ECIES ciphertext containing EmailData JSON
-    pub encrypted_data: String,
+    /// Base64-encoded ECIES ciphertext containing EmailData JSON (only if ephemeral_pubkey provided)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_data: Option<String>,
+}
+
+/// Simple response for SendEmailPlaintext (no encrypted data)
+#[derive(Debug, Serialize)]
+pub struct SendEmailPlaintextResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,6 +188,13 @@ pub struct GetEmailCountResponse {
     pub success: bool,
     pub inbox_count: i64,
     pub sent_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetSendPubkeyResponse {
+    pub success: bool,
+    /// Sender's public key (hex) for encrypting outgoing emails
+    pub send_pubkey: String,
 }
 
 #[derive(Debug, Serialize)]
