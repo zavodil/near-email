@@ -436,12 +436,8 @@ export default function Home({ accounts, loading }: HomeProps) {
     setCurrentFolder(folder);
     setSelectedEmail(null);
     setSelectedSentEmail(null);
-
-    // Clear new email badge when viewing inbox
-    if (folder === 'inbox') {
-      setNewEmailCount(0);
-      document.title = 'near.email';
-    }
+    // NOTE: Do NOT clear newEmailCount here - it should only be cleared
+    // when emails are actually loaded from server (in loadEmails)
   }
 
   function handleConnect() {
