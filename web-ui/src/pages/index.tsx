@@ -718,7 +718,9 @@ export default function Home({ accounts, loading }: HomeProps) {
           Powered by{' '}
           <a href="https://outlayer.fastnear.com" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">NEAR Outlayer</a>
           {' '}&bull;{' '}
-          <a href="/docs" className="text-blue-500 hover:underline">How it works</a>
+          <a href="/docs" className="text-blue-500 hover:underline">Docs</a>
+          {' '}&bull;{' '}
+          <a href="/dev" className="text-blue-500 hover:underline">SDK</a>
         </p>
 
         {/* Compose modal (for early compose before checking mail) */}
@@ -842,7 +844,9 @@ export default function Home({ accounts, loading }: HomeProps) {
           Powered by{' '}
           <a href="https://outlayer.fastnear.com" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">NEAR Outlayer</a>
           {' '}&bull;{' '}
-          <a href="/docs" className="text-blue-500 hover:underline">How it works</a>
+          <a href="/docs" className="text-blue-500 hover:underline">Docs</a>
+          {' '}&bull;{' '}
+          <a href="/dev" className="text-blue-500 hover:underline">SDK</a>
         </p>
 
         {/* Payment Key input modal */}
