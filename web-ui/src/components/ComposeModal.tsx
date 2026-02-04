@@ -73,6 +73,7 @@ interface ComposeModalProps {
   onSent: (to: string, subject: string, body: string, attachments?: Attachment[]) => Promise<void>;
   onSuccess?: () => void;
   onShowLimits?: () => void;
+  onOpenInvites?: () => void;
   // Optional initial values for reply
   initialTo?: string;
   initialSubject?: string;
@@ -85,6 +86,7 @@ export default function ComposeModal({
   onSent,
   onSuccess,
   onShowLimits,
+  onOpenInvites,
   initialTo = '',
   initialSubject = '',
   initialBody = '',
@@ -416,6 +418,15 @@ export default function ComposeModal({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
               </svg>
             </button>
+            {onOpenInvites && (
+              <button
+                type="button"
+                onClick={onOpenInvites}
+                className="text-xs text-purple-500 hover:text-purple-700 transition-colors"
+              >
+                Invite a friend
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <button
