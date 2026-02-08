@@ -3,6 +3,8 @@
 //! Provides REST endpoints for the WASI module to access the database,
 //! since WASI cannot make direct database connections.
 
+mod crypto;
+
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
     http::StatusCode,
@@ -99,6 +101,10 @@ struct AppState {
     /// Whether to send notification email when someone uses an invite code
     /// Default: true
     send_invite_success_email: bool,
+    /// Master public key for encrypting internal @near.email messages
+    /// When set, emails to @near.email are encrypted and stored directly
+    /// bypassing external SMTP relay
+    master_public_key: Option<secp256k1::PublicKey>,
 }
 
 #[tokio::main]
@@ -240,7 +246,28 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| v != "false" && v != "0")
         .unwrap_or(true);
 
-    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay, api_secret, fastnear_api_url, near_rpc_url, invite_rate_limiter, poll_secret, send_invite_success_email };
+    // Master public key for encrypting internal @near.email messages
+    // When set, emails to @near.email are stored directly, bypassing SMTP
+    let master_public_key = match env::var("MASTER_PUBLIC_KEY") {
+        Ok(hex_key) if !hex_key.is_empty() => {
+            match crypto::parse_public_key(&hex_key) {
+                Ok(pk) => {
+                    info!("Master public key configured - internal @near.email delivery enabled");
+                    Some(pk)
+                }
+                Err(e) => {
+                    error!("Failed to parse MASTER_PUBLIC_KEY: {}. Internal delivery disabled.", e);
+                    None
+                }
+            }
+        }
+        _ => {
+            warn!("MASTER_PUBLIC_KEY not set - @near.email emails will go through SMTP relay");
+            None
+        }
+    };
+
+    let state = AppState { db, email_domain, account_suffix, resolver, dkim, email_signature, smtp_relay, api_secret, fastnear_api_url, near_rpc_url, invite_rate_limiter, poll_secret, send_invite_success_email, master_public_key };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -782,12 +809,6 @@ async fn send_email(
         }
     }
 
-    // Log only metadata, not content (privacy)
-    info!(
-        "📤 Send email request: from={}, to={}, subject_len={}, body_len={}",
-        body.from_account, body.to, body.subject.len(), body.body.len()
-    );
-
     // Build from address - strip account suffix from account_id
     // zavodil.testnet -> zavodil@near.email (on testnet)
     // zavodil.near -> zavodil@near.email (on mainnet)
@@ -795,6 +816,43 @@ async fn send_email(
         .strip_suffix(&state.account_suffix)
         .unwrap_or(&body.from_account);
     let from_email = format!("{}@{}", from_local, state.email_domain);
+
+    // Check if recipient is @near.email - use direct internal delivery if possible
+    let internal_suffix = format!("@{}", state.email_domain).to_lowercase();
+    if body.to.to_lowercase().ends_with(&internal_suffix) {
+        if let Some(ref master_pubkey) = state.master_public_key {
+            // Internal delivery doesn't support attachments yet
+            if !body.attachments.is_empty() {
+                warn!(
+                    "📧 Internal email with attachments - falling back to SMTP: from={}, to={}, attachments={}",
+                    body.from_account, body.to, body.attachments.len()
+                );
+                // Fall through to SMTP which supports attachments
+            } else {
+                info!(
+                    "📧 Internal email: from={}, to={}, subject_len={}, body_len={}",
+                    body.from_account, body.to, body.subject.len(), body.body.len()
+                );
+                return send_internal_near_email(
+                    &state,
+                    master_pubkey,
+                    &from_email,
+                    &body.to,
+                    &body.subject,
+                    &body.body,
+                    &body.from_account,
+                ).await;
+            }
+        }
+        // No master_public_key configured - fall through to SMTP
+    }
+
+    // Log only metadata, not content (privacy)
+    info!(
+        "📤 Send email request: from={}, to={}, subject_len={}, body_len={}",
+        body.from_account, body.to, body.subject.len(), body.body.len()
+    );
+
     let from_mailbox: Mailbox = from_email
         .parse()
         .map_err(|e| {
@@ -1128,6 +1186,72 @@ async fn send_via_relay(
         .map_err(|e| format!("SMTP relay error: {}", e))?;
 
     Ok(())
+}
+
+/// Send an internal @near.email message directly (without SMTP)
+/// Encrypts the email content and stores it in the database
+async fn send_internal_near_email(
+    state: &AppState,
+    master_pubkey: &secp256k1::PublicKey,
+    from_email: &str,
+    to_email: &str,
+    subject: &str,
+    body: &str,
+    from_account: &str,
+) -> Result<Json<SendResponse>, StatusCode> {
+    // Extract recipient account_id from email address
+    // alice@near.email -> alice.near (or alice.testnet based on account_suffix)
+    let to_local = to_email
+        .split('@')
+        .next()
+        .ok_or_else(|| {
+            error!("Invalid to address for internal delivery: {}", to_email);
+            StatusCode::BAD_REQUEST
+        })?;
+    let recipient_account = format!("{}{}", to_local.to_lowercase(), state.account_suffix);
+
+    // Format email content in MIME format (matching WASI build_email_content)
+    let email_content = format!(
+        "From: {}\r\nTo: {}\r\nSubject: {}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{}",
+        from_email, to_email, subject, body
+    );
+
+    // Encrypt for recipient using derived public key
+    let encrypted_data = crypto::encrypt_for_account(master_pubkey, &recipient_account, email_content.as_bytes())
+        .map_err(|e| {
+            error!("Failed to encrypt email for {}: {}", recipient_account, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Store in database
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO emails (id, recipient, sender_email, encrypted_data, received_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        "#,
+    )
+    .bind(id)
+    .bind(&recipient_account)
+    .bind(from_email)
+    .bind(&encrypted_data)
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to store internal email: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    info!(
+        "📧 Internal email {} delivered: to={}, from={}, encrypted={}B (no SMTP)",
+        id, recipient_account, from_email, encrypted_data.len()
+    );
+
+    // Increment stats
+    increment_sent_stats(&state.db, from_account).await;
+    increment_received_stats(&state.db, &recipient_account).await;
+
+    Ok(Json(SendResponse { success: true, error: None }))
 }
 
 /// Store an internal email (already encrypted by WASI module)

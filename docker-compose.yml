@@ -62,6 +62,8 @@ services:
       SMTP_RELAY_ENABLED: ${SMTP_RELAY_ENABLED:-true}
       # API secret for authenticating requests
       API_SECRET: ${API_SECRET}
+      # Master public key for internal @near.email delivery (bypasses SMTP)
+      MASTER_PUBLIC_KEY: ${MASTER_PUBLIC_KEY}
       FASTNEAR_API_URL: ${FASTNEAR_API_URL:-https://api.fastnear.com}
       NEAR_RPC_URL: ${NEAR_RPC_URL:-}
       # Poll secret for generating poll tokens (for /poll/count endpoint)
