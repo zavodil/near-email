@@ -31,6 +31,7 @@ import LimitsModal from '@/components/LimitsModal';
 import Toast, { type ToastType } from '@/components/Toast';
 import InviteCodeModal from '@/components/InviteCodeModal';
 import InvitesModal from '@/components/InvitesModal';
+import KeyCreationFlowModal from '@/components/KeyCreationFlowModal';
 
 interface HomeProps {
   accounts: AccountState[];
@@ -101,6 +102,7 @@ export default function Home({ accounts, loading }: HomeProps) {
   const [showInvitesModal, setShowInvitesModal] = useState(false);
   const [inviteCodeFromUrl, setInviteCodeFromUrl] = useState<string | null>(null);
   const [checkingRegistration, setCheckingRegistration] = useState(false);
+  const [showKeyCreationModal, setShowKeyCreationModal] = useState(false);
 
   // Polling and notification state
   const [newEmailCount, setNewEmailCount] = useState(0);
@@ -706,6 +708,20 @@ export default function Home({ accounts, loading }: HomeProps) {
             </button>
           )}
 
+          {/* Create Payment Key button - only show if no payment key yet and on mainnet */}
+          {!paymentKeyHasKey && isConnected && (
+            <button
+              onClick={() => setShowKeyCreationModal(true)}
+              disabled={loadingEmails}
+              className="w-full mt-3 bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white py-2.5 px-6 rounded-xl font-medium transition-colors disabled:opacity-50 shadow-sm flex items-center justify-center gap-2"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+              </svg>
+              Create Payment Key (NEAR)
+            </button>
+          )}
+
           <button
             onClick={handleDisconnect}
             className="mt-4 text-sm text-gray-400 hover:text-red-600 transition-colors"
@@ -743,6 +759,24 @@ export default function Home({ accounts, loading }: HomeProps) {
             message={toast.message}
             type={toast.type}
             onClose={() => setToast(null)}
+          />
+        )}
+
+        {/* Key Creation Flow Modal */}
+        {showKeyCreationModal && accountId && (
+          <KeyCreationFlowModal
+            accountId={accountId}
+            onComplete={(paymentKey) => {
+              // Save the newly created payment key
+              setPaymentKey(paymentKey);
+              const config = getPaymentKeyConfig();
+              setPaymentKeyEnabledState(config.enabled);
+              setPaymentKeyOwnerState(config.owner);
+              setPaymentKeyHasKey(config.hasKey);
+              setShowKeyCreationModal(false);
+              showToast('Payment Key created! You can now use HTTPS mode.');
+            }}
+            onCancel={() => setShowKeyCreationModal(false)}
           />
         )}
       </div>

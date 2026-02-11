@@ -414,6 +414,49 @@ export async function signOut(): Promise<void> {
   cachedSendPubkeyAccount = null;
 }
 
+// Send a transaction to the blockchain
+// Used for payment key creation flow
+export async function sendTransaction(params: {
+  receiverId: string;
+  actions: Array<{
+    type: 'FunctionCall';
+    params: {
+      methodName: string;
+      args: Record<string, unknown>;
+      gas: string;
+      deposit: string;
+    };
+  }>;
+}): Promise<unknown> {
+  if (!selector) {
+    await initWalletSelector();
+  }
+  const wallet = await selector!.wallet();
+
+  // Convert to near-js transaction format
+  const actions = params.actions.map(action => {
+    if (action.type === 'FunctionCall') {
+      return actionCreators.functionCall(
+        action.params.methodName,
+        action.params.args,
+        BigInt(action.params.gas),
+        BigInt(action.params.deposit)
+      );
+    }
+    throw new Error(`Unsupported action type: ${action.type}`);
+  });
+
+  return wallet.signAndSendTransaction({
+    receiverId: params.receiverId,
+    actions,
+  });
+}
+
+// Get the OutLayer contract ID
+export function getOutlayerContractId(): string {
+  return OUTLAYER_CONTRACT;
+}
+
 // Call OutLayer via HTTPS API (Payment Key mode)
 async function callOutLayerHttps(action: string, params: Record<string, any>): Promise<any> {
   if (!paymentKeyConfig.key) {
