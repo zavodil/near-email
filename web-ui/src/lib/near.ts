@@ -457,6 +457,47 @@ export function getOutlayerContractId(): string {
   return OUTLAYER_CONTRACT;
 }
 
+// Call a view method on a NEAR contract via RPC (no wallet needed)
+export async function viewMethod(params: {
+  contractId: string;
+  method: string;
+  args?: Record<string, unknown>;
+}): Promise<unknown> {
+  const rpcUrl = NETWORK_ID === 'testnet'
+    ? 'https://rpc.testnet.near.org'
+    : 'https://rpc.mainnet.near.org';
+
+  const response = await fetch(rpcUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'dontcare',
+      method: 'query',
+      params: {
+        request_type: 'call_function',
+        finality: 'final',
+        account_id: params.contractId,
+        method_name: params.method,
+        args_base64: btoa(JSON.stringify(params.args || {})),
+      },
+    }),
+  });
+
+  const data = await response.json();
+
+  if (data.error) {
+    throw new Error(data.error.message || 'View method call failed');
+  }
+
+  const resultBytes = data.result?.result;
+  if (!resultBytes || resultBytes.length === 0) {
+    return null;
+  }
+
+  return JSON.parse(new TextDecoder().decode(new Uint8Array(resultBytes)));
+}
+
 // Call OutLayer via HTTPS API (Payment Key mode)
 async function callOutLayerHttps(action: string, params: Record<string, any>): Promise<any> {
   if (!paymentKeyConfig.key) {

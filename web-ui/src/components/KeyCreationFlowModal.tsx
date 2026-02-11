@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { sendTransaction, getOutlayerContractId } from '@/lib/near';
+import { sendTransaction, getOutlayerContractId, viewMethod } from '@/lib/near';
 
 interface KeyCreationFlowModalProps {
   accountId: string;
@@ -79,13 +79,27 @@ export default function KeyCreationFlowModal({
       setError(null);
       setStep('generating');
 
+      // Validate minimum amount (0.01 NEAR min deposit + 0.025 NEAR execution fees)
+      const amountNum = parseFloat(nearAmount);
+      if (isNaN(amountNum) || amountNum < 0.035) {
+        throw new Error('Minimum deposit is 0.035 NEAR (includes 0.025 NEAR fee)');
+      }
+
       // Step 1: Generate secret key
       const key = generateSecretKey();
       setSecretKey(key);
       const keyHash = await hashSecretKey(key);
 
-      // Use nonce 1 for first key (could check existing keys, but for simplicity use 1)
-      const keyNonce = 1;
+      // Query contract for next available nonce (must succeed before any transactions)
+      let keyNonce: number;
+      try {
+        keyNonce = await viewMethod({ contractId, method: 'get_next_payment_key_nonce', args: { account_id: accountId } }) as number;
+      } catch (err) {
+        throw new Error('Failed to query payment key nonce from contract. Please try again.');
+      }
+      if (!keyNonce || keyNonce < 1) {
+        throw new Error('Invalid nonce returned from contract');
+      }
       setNonce(keyNonce);
 
       // Save to localStorage in case of page reload during transaction
@@ -207,7 +221,7 @@ export default function KeyCreationFlowModal({
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-gray-900 placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
             <p className="text-xs text-gray-500 mt-1">
-              Minimum 0.1 NEAR. Additional 0.1 NEAR required for storage.
+              Minimum 0.035 NEAR (includes 0.025 NEAR fee). Additional 0.1 NEAR required for storage.
             </p>
           </div>
 
