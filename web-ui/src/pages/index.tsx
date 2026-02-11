@@ -699,7 +699,7 @@ export default function Home({ accounts, loading }: HomeProps) {
             <button
               onClick={handleOpenCompose}
               disabled={loadingEmails}
-              className="w-full mt-3 bg-blue-600 hover:bg-blue-700 text-white py-2.5 px-6 rounded-xl font-medium transition-colors disabled:opacity-50 shadow-sm flex items-center justify-center gap-2"
+              className="w-full mt-3 bg-blue-50 text-blue-700 py-2.5 px-6 rounded-xl font-medium border border-blue-200 hover:bg-blue-100 transition-colors disabled:opacity-50 shadow-sm flex items-center justify-center gap-2"
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -713,7 +713,7 @@ export default function Home({ accounts, loading }: HomeProps) {
               <div className="mt-3 border-t border-gray-200" />
               <button
                 onClick={() => setShowPaymentKeyInput(true)}
-                className="w-full mt-3 bg-white text-gray-700 py-2.5 px-6 rounded-xl font-medium border border-gray-300 hover:bg-gray-50 transition-colors shadow-sm"
+                className="w-full mt-3 bg-white text-gray-600 py-2.5 px-6 rounded-xl font-medium border border-gray-200 hover:bg-gray-50 transition-colors shadow-sm"
               >
                 Login with Payment Key
               </button>
@@ -758,6 +758,80 @@ export default function Home({ accounts, loading }: HomeProps) {
             type={toast.type}
             onClose={() => setToast(null)}
           />
+        )}
+
+        {/* Payment Key input modal */}
+        {showPaymentKeyInput && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-xl p-4 w-full max-w-xl mx-4">
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                Configure Payment Key
+              </h3>
+              <p className="text-sm text-gray-500 mb-4">
+                Enter your Payment Key to use near.email without wallet transactions.
+              </p>
+
+              {paymentKeyError && (
+                <div className="bg-red-50 text-red-700 px-3 py-2 rounded-lg text-sm mb-3 border border-red-100">
+                  {paymentKeyError}
+                </div>
+              )}
+
+              <input
+                type="text"
+                value={paymentKeyInput}
+                onChange={(e) => setPaymentKeyInput(e.target.value)}
+                placeholder="alice.near:1:abcd1234..."
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                onKeyDown={(e) => e.key === 'Enter' && handleSavePaymentKey()}
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                Format: owner:nonce:key
+              </p>
+
+              <div className="flex justify-end gap-2 mt-4">
+                <button
+                  onClick={() => {
+                    setShowPaymentKeyInput(false);
+                    setPaymentKeyInput('');
+                    setPaymentKeyError(null);
+                  }}
+                  className="px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSavePaymentKey}
+                  className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                >
+                  Save
+                </button>
+              </div>
+
+              {isConnected && accountId && (
+                <>
+                  <div className="flex items-center gap-3 my-4">
+                    <div className="flex-1 h-px bg-gray-200"></div>
+                    <span className="text-xs text-gray-400">or</span>
+                    <div className="flex-1 h-px bg-gray-200"></div>
+                  </div>
+
+                  <button
+                    onClick={() => {
+                      setShowPaymentKeyInput(false);
+                      setShowKeyCreationModal(true);
+                    }}
+                    className="w-full text-sm text-gray-600 hover:text-gray-900 py-2 px-3 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
+                  >
+                    Buy Payment Key with NEAR
+                  </button>
+                  <p className="text-xs text-gray-400 mt-1 text-center">
+                    Your NEAR will be converted to USDC. Usage fees are deducted from the balance.
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
         )}
 
         {/* Key Creation Flow Modal */}
