@@ -11,7 +11,7 @@ interface KeyCreationFlowModalProps {
   onCancel: () => void;
 }
 
-type Step = 'intro' | 'generating' | 'registering' | 'funding' | 'complete' | 'error';
+type Step = 'intro' | 'generating' | 'registering' | 'key_ready' | 'funding' | 'complete' | 'error';
 
 // Generate a random 32-byte key
 function generateSecretKey(): string {
@@ -174,9 +174,25 @@ export default function KeyCreationFlowModal({
         timestamp: Date.now(),
       }));
 
+      // Store_secrets succeeded — show key and let user trigger top_up manually
+      // (browser blocks second popup if opened without user gesture)
+      const fullKey = `${accountId}:${keyNonce}:${key}`;
+      setGeneratedPaymentKey(fullKey);
+      setStep('key_ready');
+
+    } catch (err) {
+      console.error('Key creation failed:', err);
+      setError((err as Error).message);
+      setStep('error');
+    }
+  };
+
+  // Step 3: Top up with NEAR — triggered by user click (separate user gesture)
+  const handleTopUp = async () => {
+    try {
+      setError(null);
       setStep('funding');
 
-      // Step 3: Call top_up_payment_key_with_near to add balance
       const yoctoNear = parseNearToYocto(nearAmount);
       const swapContractId = 'v1.publishintent.near';
 
@@ -186,23 +202,20 @@ export default function KeyCreationFlowModal({
           type: 'FunctionCall',
           params: {
             methodName: 'top_up_payment_key_with_near',
-            args: { nonce: keyNonce, swap_contract_id: swapContractId },
-            gas: '200000000000000', // 200 TGas (needs more for cross-contract calls)
+            args: { nonce, swap_contract_id: swapContractId },
+            gas: '200000000000000', // 200 TGas
             deposit: yoctoNear,
           },
         }],
       });
 
       // Success! Clean up localStorage
+      const storageKey = `payment_key_creation_${accountId}`;
       localStorage.removeItem(storageKey);
-
-      // Create the full payment key string
-      const fullKey = `${accountId}:${keyNonce}:${key}`;
-      setGeneratedPaymentKey(fullKey);
       setStep('complete');
 
     } catch (err) {
-      console.error('Key creation failed:', err);
+      console.error('Top up failed:', err);
       setError((err as Error).message);
       setStep('error');
     }
@@ -311,6 +324,56 @@ export default function KeyCreationFlowModal({
               />
             ))}
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Key ready — store_secrets succeeded, show key and let user trigger top_up
+  if (step === 'key_ready' && generatedPaymentKey) {
+    return (
+      <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div className="bg-white rounded-xl shadow-xl p-6 max-w-md w-full">
+          <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+            </svg>
+          </div>
+          <h2 className="text-xl font-bold text-gray-900 text-center mb-2">
+            Key Registered!
+          </h2>
+          <p className="text-sm text-gray-600 text-center mb-4">
+            Save this key now, then add NEAR balance.
+          </p>
+
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4">
+            <p className="text-xs text-yellow-800 font-medium mb-2">
+              YOUR PAYMENT KEY (save now!)
+            </p>
+            <code className="text-xs text-gray-900 break-all block bg-white p-2 rounded border border-yellow-300">
+              {generatedPaymentKey}
+            </code>
+            <button
+              onClick={handleCopyKey}
+              className="mt-2 w-full bg-yellow-100 hover:bg-yellow-200 text-yellow-800 px-3 py-1.5 rounded text-sm font-medium transition-colors"
+            >
+              Copy to Clipboard
+            </button>
+          </div>
+
+          <button
+            onClick={handleTopUp}
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
+          >
+            Deposit {nearAmount} NEAR
+          </button>
+
+          <button
+            onClick={handleFinish}
+            className="w-full mt-2 text-sm text-gray-400 hover:text-gray-600 transition-colors"
+          >
+            Skip (deposit later)
+          </button>
         </div>
       </div>
     );
