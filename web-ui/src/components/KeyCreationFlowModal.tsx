@@ -115,7 +115,7 @@ export default function KeyCreationFlowModal({
             methodName: 'store_secrets',
             args: storeSecretsArgs,
             gas: '100000000000000', // 100 TGas
-            deposit: '100000000000000000000000', // 0.1 NEAR for storage
+            deposit: '10000000000000000000000', // 0.01 NEAR for storage (excess refunded)
           },
         }],
       });
@@ -200,7 +200,7 @@ export default function KeyCreationFlowModal({
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-gray-900 placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
             <p className="text-xs text-gray-500 mt-1">
-              Minimum 0.035 NEAR (includes 0.025 NEAR fee). Additional 0.1 NEAR required for storage.
+              Minimum 0.035 NEAR (includes 0.025 NEAR fee). Additional ~0.01 NEAR for storage (excess refunded).
             </p>
           </div>
 
@@ -209,7 +209,7 @@ export default function KeyCreationFlowModal({
               This will require 2 transactions:
             </p>
             <ol className="text-sm text-blue-700 mt-2 list-decimal list-inside">
-              <li>Register payment key (0.1 NEAR storage)</li>
+              <li>Register payment key (~0.01 NEAR storage, excess refunded)</li>
               <li>Top up with NEAR (swapped to USDC)</li>
             </ol>
           </div>

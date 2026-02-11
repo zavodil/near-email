@@ -490,6 +490,11 @@ export async function viewMethod(params: {
     throw new Error(data.error.message || 'View method call failed');
   }
 
+  // Contract-level errors (e.g. MethodNotFound) come as data.result.error
+  if (data.result?.error) {
+    throw new Error(data.result.error);
+  }
+
   const resultBytes = data.result?.result;
   if (!resultBytes || resultBytes.length === 0) {
     return null;
