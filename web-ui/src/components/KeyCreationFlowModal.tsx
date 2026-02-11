@@ -1,6 +1,8 @@
 'use client';
 
 import { useState } from 'react';
+import { chacha20poly1305 } from '@noble/ciphers/chacha';
+import { randomBytes } from '@noble/ciphers/webcrypto';
 import { sendTransaction, getOutlayerContractId, viewMethod } from '@/lib/near';
 
 interface KeyCreationFlowModalProps {
@@ -20,13 +22,46 @@ function generateSecretKey(): string {
     .join('');
 }
 
-// Hash the secret key to get public key hash (for contract storage)
-async function hashSecretKey(secretKey: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(secretKey);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return bytes;
+}
+
+// Encrypt with ChaCha20-Poly1305 using keystore pubkey (symmetric key)
+// Format: nonce (12 bytes) || ciphertext + tag
+function encryptWithPubkey(pubkeyHex: string, plaintext: string): Uint8Array {
+  const key = hexToBytes(pubkeyHex);
+  const plaintextBytes = new TextEncoder().encode(plaintext);
+  const nonce = randomBytes(12);
+  const cipher = chacha20poly1305(key, nonce);
+  const ciphertextWithTag = cipher.encrypt(plaintextBytes);
+  const encrypted = new Uint8Array(12 + ciphertextWithTag.length);
+  encrypted.set(nonce, 0);
+  encrypted.set(ciphertextWithTag, 12);
+  return encrypted;
+}
+
+// Fetch encryption pubkey from coordinator keystore
+async function fetchEncryptionPubkey(owner: string, nonce: number): Promise<string> {
+  const response = await fetch('/api/outlayer/secrets/pubkey', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      accessor: { type: 'System', PaymentKey: {} },
+      owner,
+      profile: nonce.toString(),
+      secrets_json: '{}',
+    }),
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to get encryption key: ${errorText}`);
+  }
+  const { pubkey } = await response.json();
+  return pubkey;
 }
 
 // Convert NEAR to yoctoNEAR
@@ -67,7 +102,6 @@ export default function KeyCreationFlowModal({
       // Step 1: Generate secret key
       const key = generateSecretKey();
       setSecretKey(key);
-      const keyHash = await hashSecretKey(key);
 
       // Query contract for next available nonce (must succeed before any transactions)
       let keyNonce: number;
@@ -80,6 +114,22 @@ export default function KeyCreationFlowModal({
         throw new Error('Invalid nonce returned from contract');
       }
       setNonce(keyNonce);
+
+      // Fetch encryption pubkey from coordinator keystore
+      const pubkey = await fetchEncryptionPubkey(accountId, keyNonce);
+
+      // Prepare secret data (same format as dashboard CreateKeyForm)
+      const secretData = {
+        key,
+        project_ids: [] as string[],
+        max_per_call: '0',
+        initial_balance: '0',
+      };
+      const secretJson = JSON.stringify(secretData);
+
+      // Encrypt with ChaCha20-Poly1305 using keystore pubkey
+      const encryptedArray = encryptWithPubkey(pubkey, secretJson);
+      const encryptedBase64 = btoa(String.fromCharCode(...Array.from(encryptedArray)));
 
       // Save to localStorage in case of page reload during transaction
       const storageKey = `payment_key_creation_${accountId}`;
@@ -98,13 +148,8 @@ export default function KeyCreationFlowModal({
       const storeSecretsArgs = {
         accessor: { System: 'PaymentKey' },
         profile: keyNonce.toString(),
-        access: { FullAccess: {} },
-        enc_secrets: JSON.stringify({
-          key_hash: keyHash,
-          project_ids: null,
-          max_per_call: null,
-        }),
-        public_key: null,
+        encrypted_secrets_base64: encryptedBase64,
+        access: 'AllowAll',
       };
 
       await sendTransaction({

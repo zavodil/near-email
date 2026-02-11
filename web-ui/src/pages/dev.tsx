@@ -98,7 +98,7 @@ const PAYMENT_KEY = 'your-account.near:nonce:secret'; // From dashboard
 // Send email via OutLayer API (plaintext - simplest option)
 async function sendEmail(to: string, subject: string, body: string) {
   const response = await fetch(
-    \`\${OUTLAYER_API}/call/outlayer.near/\${PROJECT_ID}\`,
+    \`\${OUTLAYER_API}/call/\${PROJECT_ID}\`,
     {
       method: 'POST',
       headers: {
@@ -121,7 +121,7 @@ async function getEmails() {
   const ephemeralPubkeyHex = Buffer.from(ephemeralPubkey).toString('hex');
 
   const response = await fetch(
-    \`\${OUTLAYER_API}/call/outlayer.near/\${PROJECT_ID}\`,
+    \`\${OUTLAYER_API}/call/\${PROJECT_ID}\`,
     {
       method: 'POST',
       headers: {
@@ -257,7 +257,7 @@ PAYMENT_KEY = os.environ.get("OUTLAYER_PAYMENT_KEY", "your-account.near:nonce:se
 def send_email_plaintext(to: str, subject: str, body: str) -> dict:
     """Send email via OutLayer HTTPS API (plaintext - simplest option)"""
     response = requests.post(
-        f"{OUTLAYER_API}/call/outlayer.near/{PROJECT_ID}",
+        f"{OUTLAYER_API}/call/{PROJECT_ID}",
         headers={"Content-Type": "application/json", "X-Payment-Key": PAYMENT_KEY},
         json={"input": {"action": "send_email_plaintext", "to": to, "subject": subject, "body": body}},
     )
@@ -272,7 +272,7 @@ def get_emails() -> dict:
     ephemeral_pubkey_hex = ephemeral_privkey.public_key.format(compressed=True).hex()
 
     response = requests.post(
-        f"{OUTLAYER_API}/call/outlayer.near/{PROJECT_ID}",
+        f"{OUTLAYER_API}/call/{PROJECT_ID}",
         headers={"Content-Type": "application/json", "X-Payment-Key": PAYMENT_KEY},
         json={"input": {"action": "get_emails", "ephemeral_pubkey": ephemeral_pubkey_hex, "max_output_size": 1500000}},
     )
