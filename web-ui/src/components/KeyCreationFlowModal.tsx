@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { sendTransaction, getOutlayerContractId, viewMethod } from '@/lib/near';
 
 interface KeyCreationFlowModalProps {
@@ -48,31 +48,10 @@ export default function KeyCreationFlowModal({
   const contractId = getOutlayerContractId();
   const [step, setStep] = useState<Step>('intro');
   const [nearAmount, setNearAmount] = useState<string>('1');
-  const [nearPrice, setNearPrice] = useState<number | null>(null);
   const [secretKey, setSecretKey] = useState<string | null>(null);
   const [nonce, setNonce] = useState<number>(1);
   const [error, setError] = useState<string | null>(null);
   const [generatedPaymentKey, setGeneratedPaymentKey] = useState<string | null>(null);
-
-  // Fetch NEAR price on mount
-  useEffect(() => {
-    async function fetchPrice() {
-      try {
-        const response = await fetch('https://api.outlayer.fastnear.com/oracle/price/near');
-        if (response.ok) {
-          const data = await response.json();
-          setNearPrice(data.price);
-        }
-      } catch (err) {
-        console.error('Failed to fetch NEAR price:', err);
-      }
-    }
-    fetchPrice();
-  }, []);
-
-  const expectedUsdc = nearPrice && nearAmount
-    ? (parseFloat(nearAmount) * nearPrice).toFixed(2)
-    : null;
 
   const handleStart = async () => {
     try {
@@ -224,19 +203,6 @@ export default function KeyCreationFlowModal({
               Minimum 0.035 NEAR (includes 0.025 NEAR fee). Additional 0.1 NEAR required for storage.
             </p>
           </div>
-
-          {expectedUsdc && (
-            <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
-              <p className="text-sm text-green-800">
-                Estimated balance: ~${expectedUsdc} USDC
-                {nearPrice && (
-                  <span className="text-xs text-green-600 block">
-                    (1 NEAR = ${nearPrice.toFixed(2)})
-                  </span>
-                )}
-              </p>
-            </div>
-          )}
 
           <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
             <p className="text-sm text-blue-800">
