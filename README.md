@@ -1,5 +1,7 @@
 # NEAR Email
 
+> **[Full documentation](https://outlayer.fastnear.com/docs/examples#near-email)** on the OutLayer dashboard.
+
 Blockchain-native email for NEAR accounts. Every NEAR account automatically has an email address: `alice.near` -> `alice@near.email`
 
 ## Architecture

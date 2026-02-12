@@ -149,10 +149,12 @@ cd ../.. && cargo run -p upload-fastfs -- \
 # Send test email to NEAR account
 echo "Test body" | mail -s "Test" alice@near.email
 
-# Check WASI module
-curl -X POST https://testnet-api.outlayer.fastnear.com/execute \
+# Check WASI module (mainnet only — near-email is not deployed on testnet
+# because email addresses are based on mainnet .near accounts)
+curl -X POST https://api.outlayer.fastnear.com/call/zavodil.near/near-email \
+  -H "X-Payment-Key: owner:1:secret" \
   -H "Content-Type: application/json" \
-  -d '{"project_id": "...", "request": {"get_emails": {...}}}'
+  -d '{"action": "get_emails"}'
 ```
 
 ## Common Issues
