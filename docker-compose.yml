@@ -69,6 +69,8 @@ services:
       # Poll secret for generating poll tokens (for /poll/count endpoint)
       # If not set, random secret generated on startup (tokens invalidated on restart)
       POLL_SECRET: ${POLL_SECRET:-}
+      # Send notification email to inviter when their invite is accepted
+      SEND_INVITE_SUCCESS_EMAIL: ${SEND_INVITE_SUCCESS_EMAIL:-true}
     depends_on:
       postgres:
         condition: service_healthy
