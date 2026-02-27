@@ -36,6 +36,8 @@ WORKDIR /app
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
+# Lowercase alias for case-sensitive Linux FS (nginx/openskills expect lowercase)
+RUN cp public/SKILL.md public/skill.md 2>/dev/null || true
 
 EXPOSE 3000
 ENV PORT 3000
