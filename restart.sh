@@ -10,14 +10,13 @@ set -e
 #   ./restart.sh --pull db-api      # git pull + rebuild + restart db-api
 #   ./restart.sh --logs db-api      # restart db-api and tail logs
 
-COMPOSE_FILE="docker-compose.mainnet.yml"
+COMPOSE_FILE="docker-compose.yml"
+ENV_FILE=".env.mainnet"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-if [ ! -f "$COMPOSE_FILE" ]; then
-    echo "ERROR: $COMPOSE_FILE not found in $SCRIPT_DIR"
-    echo "Available compose files:"
-    ls -1 docker-compose*.yml 2>/dev/null
+if [ ! -f "$ENV_FILE" ]; then
+    echo "ERROR: $ENV_FILE not found in $SCRIPT_DIR"
     exit 1
 fi
 
@@ -44,7 +43,7 @@ for arg in "$@"; do
     esac
 done
 
-DC="docker compose -f $COMPOSE_FILE"
+DC="docker compose -f $COMPOSE_FILE --env-file $ENV_FILE"
 
 if $PULL; then
     echo "==> git pull"
@@ -60,10 +59,10 @@ if $PULL; then
 else
     if [ ${#SERVICES[@]} -eq 0 ]; then
         echo "==> restart all"
-        $DC restart
+        $DC up -d --force-recreate
     else
         echo "==> restart: ${SERVICES[*]}"
-        $DC restart "${SERVICES[@]}"
+        $DC up -d --force-recreate "${SERVICES[@]}"
     fi
 fi
 
