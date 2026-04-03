@@ -234,6 +234,14 @@ export default function ComposeModal({
       setError('Please enter a recipient');
       return;
     }
+    if (!subject.trim()) {
+      setError('Please enter a subject');
+      return;
+    }
+    if (!body.trim()) {
+      setError('Please enter a message');
+      return;
+    }
 
     setSending(true);
     setError(null);
@@ -437,7 +445,7 @@ export default function ComposeModal({
             </button>
             <button
               onClick={handleSend}
-              disabled={sending}
+              disabled={sending || !to.trim() || !subject.trim() || !body.trim()}
               className="flex items-center gap-1.5 px-4 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 shadow-sm"
             >
               {sending ? (
