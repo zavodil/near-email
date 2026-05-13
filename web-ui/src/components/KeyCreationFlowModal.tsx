@@ -150,6 +150,11 @@ export default function KeyCreationFlowModal({
         profile: keyNonce.toString(),
         encrypted_secrets_base64: encryptedBase64,
         access: 'AllowAll',
+        // Per-vault master Phase 2: payment keys live on the OutLayer
+        // default master (operational data, not custody — see plan
+        // Category B). near.email pre-dates vaults; no migration
+        // planned for this UI.
+        vault_id: null,
       };
 
       await sendTransaction({
